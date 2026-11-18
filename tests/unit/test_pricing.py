@@ -302,6 +302,41 @@ def test_promo_label_shows_unit_price_from_promo_price() -> None:
     assert label.unit_price_text == "40,00 €/kg"  # 8,00 € for 200 g
 
 
+def test_repricing_a_running_promo_keeps_both_limits() -> None:
+    """Regular 10,00 for 60 days, promo 8,00 running since day -3, so its prior price
+    is 10,00. Since the start an import raised regular to 12,00. Repricing the promo:
+    9,50 is fine; 10,50 and 10,00 are below regular but not below the original prior
+    price; 12,50 is above both."""
+    start = T0 - timedelta(days=3)
+    history = [
+        _point(1000, 60),
+        PricePoint(next(_seq), 800, PriceKind.PROMO, start, PriceSource.PROMO),
+    ]
+    end = T0 + timedelta(days=7)
+    old = PriceState(1200, 800, start, end)
+    ok = apply_price_change(_product(), old, PriceState(1200, 950, start, end), history, T0,
+                            PriceSource.MANUAL)  # fmt: skip
+    assert ok.state.promo_cents == 950
+    for cents in (1050, 1000, 1250):
+        with pytest.raises(PromoRefused) as exc:
+            apply_price_change(_product(), old, PriceState(1200, cents, start, end), history,
+                               T0, PriceSource.MANUAL)  # fmt: skip
+        assert exc.value.reason is PromoRefusal.NOT_A_DISCOUNT  # prior is checked first
+
+
+def test_repricing_a_running_promo_stays_below_regular() -> None:
+    """Short history, so the running promo uses a manual prior price of 15,00; regular
+    is 12,00. Repricing to 12,50 is below the prior price but not below regular."""
+    start = T0 - timedelta(days=3)
+    end = T0 + timedelta(days=7)
+    history = [_point(1200, 10)]
+    old = PriceState(1200, 900, start, end, promo_prior_cents=1500)
+    with pytest.raises(PromoRefused) as exc:
+        apply_price_change(_product(), old, PriceState(1200, 1250, start, end), history, T0,
+                           PriceSource.MANUAL, entered_prior_cents=1500)  # fmt: skip
+    assert exc.value.reason is PromoRefusal.NOT_BELOW_REGULAR
+
+
 def test_import_below_running_promo_removes_it_now() -> None:
     """Regular 10,00, promo 8,00 running. An import sets regular to 7,90: the promo is
     no longer below regular, so it ends now and history records the 7,90 on the shelf."""

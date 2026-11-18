@@ -19,7 +19,9 @@ manual prior price is higher than today's regular price.
 - Editing a running promo (lead's reading of the rule above, awaiting Tasos's
   confirmation): the past-start check is waived only for a promo that is running now
   and keeps its `promo_from`. Its end or price may be edited; the history-based prior
-  price is unchanged and the promo's own price never enters its window. A manual prior
+  price is unchanged and the promo's own price never enters its window. A new promo
+  price must still be strictly below that original prior price and the current regular
+  price. A manual prior
   price counts as cleared by the edit, like any promo change, so the admin re-enters it
   (workstream E pre-fills it). Setting `promo_to` to now or earlier removes the promo.
   An expired promo cannot be revived this way: carrying it again is a new promo, whose

@@ -143,7 +143,10 @@ def apply_price_change(
        (``old.promo_from <= now < old.promo_to``) and keeps the same ``promo_from``
        may have ``promo_to`` or ``promo_cents`` edited. Its prior price is still
        computed for its original ``promo_from``, so editing a running promo never pulls
-       its own price into its 30-day window. A ``requested.promo_to <= now`` ends the
+       its own price into its 30-day window. A repriced promo is validated like any
+       other: the new ``promo_cents`` must stay strictly below that original prior
+       price and the current regular price, or the edit is refused. A
+       ``requested.promo_to <= now`` ends the
        promo now: it is removed from ``state``.
     2. The manual prior price. ``requested.promo_prior_cents`` is ignored as input.
        ``entered_prior_cents`` is what an admin typed in this request: when given it is
