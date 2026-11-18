@@ -426,6 +426,28 @@ def test_promo_removed_by_revalidation_also_clears_manual_prior() -> None:
     assert sorted(e.kind for e in change.events) == ["promo.prior_cleared", "promo.refused"]
 
 
+def test_prefilled_prior_is_ignored_when_revalidation_removes_the_promo() -> None:
+    """E's form pre-fills the manual prior. The admin lowers regular to 8,50, below the
+    unchanged running promo of 9,00: no error; the promo goes, the prior is not stored."""
+    start, end = T0 - timedelta(days=2), T0 + timedelta(days=5)
+    old = PriceState(1000, 900, start, end, promo_prior_cents=1200)
+    change = apply_price_change(_product(), old, PriceState(850, 900, start, end),
+                                [_point(1000, 10)], T0, PriceSource.MANUAL,
+                                entered_prior_cents=1200)  # fmt: skip
+    assert change.state == PriceState(850)
+    assert sorted(e.kind for e in change.events) == ["promo.prior_cleared", "promo.refused"]
+
+
+def test_partial_promo_and_negative_prior_are_errors() -> None:
+    with pytest.raises(ValueError):
+        apply_price_change(_product(), PriceState(1000), PriceState(1000, 800), [], T0,
+                           PriceSource.MANUAL)  # fmt: skip
+    week = T0 + timedelta(days=7)
+    with pytest.raises(ValueError):
+        apply_price_change(_product(), PriceState(1000), PriceState(1000, 800, T0, week),
+                           [], T0, PriceSource.MANUAL, entered_prior_cents=-1)  # fmt: skip
+
+
 def test_entered_prior_without_a_promo_is_an_error() -> None:
     with pytest.raises(ValueError):
         apply_price_change(_product(), PriceState(1000), PriceState(1000), [], T0,

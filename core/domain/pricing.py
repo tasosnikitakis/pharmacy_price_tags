@@ -138,7 +138,9 @@ def apply_price_change(
     the promo alone (an import, or an edit of the regular price only) the caller copies
     ``old``'s promo fields into ``requested`` unchanged. Leaving them out means "end the
     promo". The promo in ``requested`` is *unchanged* when ``promo_cents``,
-    ``promo_from`` and ``promo_to`` all equal ``old``'s, otherwise *changed*.
+    ``promo_from`` and ``promo_to`` all equal ``old``'s, otherwise *changed*. A
+    partial promo (some of ``promo_cents``, ``promo_from``, ``promo_to`` set, not all)
+    raises ``ValueError``.
 
     0. Housekeeping: an unchanged promo that has expired (``promo_to <= now``) is
        dropped from ``state`` with no refusal and no ``promo.refused`` event (only
@@ -167,8 +169,12 @@ def apply_price_change(
        given, the stored ``old.promo_prior_cents`` is kept only while the promo is
        unchanged; if ``promo_cents``, ``promo_from`` or ``promo_to`` change, or the
        promo ends or is removed by any rule here (0, 1 or 3), it is cleared and
-       ``promo.prior_cleared`` is logged. ``entered_prior_cents`` without a promo in
-       the resulting ``state`` raises ``ValueError``. An entered prior price is stored
+       ``promo.prior_cleared`` is logged. ``entered_prior_cents`` raises
+       ``ValueError`` only when ``requested`` itself has no promo, or when it is
+       negative. When rule 0 or 3 removes an unchanged promo, ``entered_prior_cents``
+       is ignored: nothing is stored, no ``promo.prior_set`` is logged, and the events
+       are those of the removal (``promo.refused`` for rule 3, plus
+       ``promo.prior_cleared`` if a manual prior price was stored). An entered prior price is stored
        even when history covers the 30-day window; ``resolve_prior_price`` then uses
        history.
     3. Any promo left in ``state``, running or scheduled, is re-validated with
@@ -233,8 +239,8 @@ def history_rows_for_change(
 ) -> list[NewPricePoint]:
     """The ``price_history`` rows to append after any write to a ``price`` row.
 
-    Called only by ``apply_price_change``, so every caller follows the same rules (see
-    ``PricePoint`` for how rows are read).
+    Called only by ``apply_price_change`` and ``apply_product_change``, so every caller
+    follows the same rules (see ``PricePoint`` for how rows are read).
     Returned in the order they must be inserted:
 
     1. At ``now``: the price in effect now under ``new`` (``promo`` kind if the promo is

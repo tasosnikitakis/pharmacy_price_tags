@@ -32,7 +32,7 @@ class SeenTag:
     battery_mv: int | None
     battery_pct: int | None  # None unless the vendor reports a calibrated percentage
     seen_at: datetime  # timezone-aware UTC
-    firmware: str | None = None
+    firmware: str | None = None  # at most 64 characters, as SeenTagReport allows
 
 
 @dataclass(frozen=True, slots=True)
