@@ -3,7 +3,8 @@
 An admin logs in, edits a price on the Products page, and the label preview changes.
 The core runs in a background uvicorn server on the test's database session (rolled
 back afterwards). The browser is driven by Node's ``playwright`` package (preinstalled
-in cloud sessions, with Chromium); the test is skipped where it is missing.
+in cloud sessions, with Chromium, and installed by CI); the test is skipped where it is
+missing, except in CI, where it fails (``require_playwright``).
 """
 
 from __future__ import annotations
@@ -58,7 +59,7 @@ const [base, email, password, productId] = process.argv.slice(2);
     await page.fill('#email', email);
     await page.fill('#password', password);
     await page.click('button[type=submit]');
-    await page.waitForURL(`${base}/products`);
+    await page.waitForURL(`${base}/`);  // the Dashboard is the start page
     await page.goto(`${base}/products/${productId}`);
     const img = page.locator('#label-preview');
     await img.waitFor();
@@ -101,6 +102,19 @@ def _node_with_playwright() -> tuple[str, dict[str, str]] | None:
     return (node, env) if probe.returncode == 0 else None
 
 
+def require_playwright() -> tuple[str, dict[str, str]]:
+    """Node and the environment to run a Playwright script with. Skips the test where
+    Node's ``playwright`` package is missing, except in CI (``CI=true``), which installs
+    it: there a missing Playwright fails the test, so a skip cannot hide a failure."""
+    found = _node_with_playwright()
+    if found is not None:
+        return found
+    message = "Node with the playwright package is not available"
+    if os.environ.get("CI", "").lower() == "true":
+        pytest.fail(f"{message}, but CI must run the browser tests")
+    pytest.skip(message)
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -132,10 +146,7 @@ def server(db: Session, tmp_path: Path) -> Iterator[str]:
 
 
 def test_admin_edits_price_and_preview_changes(db: Session, server: str, tmp_path: Path) -> None:
-    found = _node_with_playwright()
-    if found is None:
-        pytest.skip("Node with the playwright package is not available")
-    node, env = found
+    node, env = require_playwright()
     admin = add_user(db, "admin")
     product = add_product(db, f"Κρέμα χεριών {suffix()}", 1290)
     add_tag_type_row(db)
@@ -169,7 +180,7 @@ const [base, email, password, productId, lastDay] = process.argv.slice(2);
     await page.fill('#email', email);
     await page.fill('#password', password);
     await page.click('button[type=submit]');
-    await page.waitForURL(`${base}/products`);
+    await page.waitForURL(`${base}/`);  // the Dashboard is the start page
     await page.goto(`${base}/products/${productId}`);
     const form = page.locator('form[action$="/promo"]');
     result.validBefore = await form.evaluate((f) => f.checkValidity());
@@ -193,10 +204,7 @@ def test_admin_edits_running_promo_end_and_price(db: Session, server: str, tmp_p
     """Decision 0009: a promo running since yesterday keeps its start; its end and
     price can be edited in the browser, and its prior price stays the one from before
     the original start."""
-    found = _node_with_playwright()
-    if found is None:
-        pytest.skip("Node with the playwright package is not available")
-    node, env = found
+    node, env = require_playwright()
     tz = display_tz()
     today = T0.astimezone(tz).date()
     admin = add_user(db, "admin")

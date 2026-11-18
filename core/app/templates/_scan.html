@@ -1,0 +1,14 @@
+{# Camera scanning for one text field (``/static/app.js``). The button stays hidden
+   unless the browser can use the camera (HTTPS and getUserMedia); the field always
+   works on its own, typed or filled by a USB scanner. #}
+{% macro scan_button(field, formats) %}
+<div class="scan" data-scan-box="{{ field }}">
+  <button type="button" class="secondary scan-start" data-scan="{{ field }}" data-scan-formats="{{ formats }}" hidden>{{ t("scan.start") }}</button>
+  <p class="hint scan-https" data-scan-https hidden>{{ t("scan.needs_https") }}</p>
+  <div class="scan-view" data-scan-view hidden>
+    <video playsinline muted></video>
+    <button type="button" class="secondary" data-scan-stop>{{ t("scan.stop") }}</button>
+  </div>
+  <p class="flash flash-error" data-scan-error data-msg-denied="{{ t('scan.denied') }}" data-msg-failed="{{ t('scan.failed') }}" role="alert" hidden></p>
+</div>
+{% endmacro %}

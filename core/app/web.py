@@ -7,15 +7,16 @@ encrypted, so it holds only ids and tokens: the user id, a fingerprint of the
 password hash (so a password reset ends the user's other sessions), the CSRF token,
 pending flash messages and the pending import upload's token. Never a password.
 
-**Roles** (section 9): ``staff`` can view and, later, bind and audit; ``admin`` can do
+**Roles** (section 9): ``staff`` can view, bind and audit; ``admin`` can do
 everything. Each route declares what it needs with ``CurrentUser`` or ``AdminUser``.
 The user row is read on every request, so a deactivated user is logged out at once.
 
 **CSRF.** Every state-changing request (``POST`` and friends) must carry the session's
 token, as the ``csrf_token`` form field or, from HTMX, the ``X-CSRF-Token`` header
 (set on ``<body hx-headers>``). Checked by ``check_csrf``, a dependency of every UI
-router. Before any body is read, ``UiGuard`` refuses a request whose session has no
-token or no user, and caps the body size; it also sets the anti-framing headers.
+router. Before any body is read, ``UiGuard`` sends a request without a logged-in user
+to the login page, refuses a logged-in one whose session has no token, and caps the
+body size; it also sets the anti-framing headers.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse, Response
@@ -68,6 +69,10 @@ _env = templates.env
 _env.globals["t"] = t
 _env.globals["error_message"] = error_message
 _env.globals["LANGUAGE"] = LANGUAGE
+#: The vendored ZXing bundle, loaded by ``/static/app.js`` only when the browser has
+#: no ``BarcodeDetector`` (see ``static/vendor/README.md``).
+ZXING_SRC = "/static/vendor/zxing-library-0.23.0/index.min.js"
+_env.globals["ZXING_SRC"] = ZXING_SRC
 _env.filters["money"] = formatting.money
 _env.filters["signed_money"] = formatting.signed_money
 _env.filters["cents_input"] = formatting.cents_input
@@ -75,6 +80,7 @@ _env.filters["date_el"] = formatting.date_el
 _env.filters["time_el"] = formatting.time_el
 _env.filters["datetime_el"] = formatting.datetime_el
 _env.filters["date_input"] = formatting.date_input
+_env.filters["age_el"] = formatting.age_el
 _env.filters["athens"] = formatting.local
 _env.filters["pack_size"] = lambda p: formatting.pack_size(p.pack_qty_milli, p.pack_unit)
 _env.filters["milli_input"] = formatting.milli_input
@@ -270,9 +276,11 @@ class UiGuard:
     """ASGI middleware inside ``SessionMiddleware`` for the admin UI (not the gateway API).
 
     - Adds ``FRAME_HEADERS`` to every response (clickjacking).
-    - Refuses a state-changing request before its body is read: 403 when the session
-      has no CSRF token or, except for ``POST /login``, no logged-in user; 413 when
-      ``Content-Length`` is over ``max_bytes``. While the body is read, it is cut off
+    - Stops a state-changing request before its body is read: with nobody logged in
+      (except ``POST /login`` with the session's CSRF token) it redirects to the login
+      page, as ``HX-Redirect`` for HTMX and a 303 otherwise; a logged-in session
+      without a CSRF token gets 403; 413 when ``Content-Length`` is over
+      ``max_bytes``. While the body is read, it is cut off
       at ``max_bytes`` too (413), whatever the headers said. The CSRF token itself and
       the role are checked later, by ``check_csrf`` and the route.
     """
@@ -302,24 +310,37 @@ class UiGuard:
             log.warning(
                 "ui request refused early (%s): %s %s", code, scope["method"], scope["path"]
             )
-            response = Response(
-                f"<!doctype html><title>{t('error.title')}</title><p>{error_message(code)}</p>",
-                status_code=status_code,
-                media_type="text/html; charset=utf-8",
-            )
+            response: Response
+            if code == "auth.login_required":
+                response = _to_login(scope)
+            else:
+                response = Response(
+                    f"<!doctype html><title>{t('error.title')}</title><p>{error_message(code)}</p>",
+                    status_code=status_code,
+                    media_type="text/html; charset=utf-8",
+                )
             await response(scope, receive, send_with_headers)
             return
         await self.app(scope, self._capped(receive), send_with_headers)
 
     def _refusal(self, scope: Scope) -> tuple[str, int] | None:
+        """``None`` to let the request through, else ``(error code, status)``.
+
+        Nobody logged in (an expired or logged-out session, or none at all): the user is
+        sent to the login page (``auth.login_required``), also for ``POST /login`` from
+        a login page whose session expired. A logged-in session without a CSRF token
+        cannot come from this app's pages: 403.
+        """
         length = dict(scope.get("headers") or []).get(b"content-length")
         if length is not None and (not length.isdigit() or int(length) > self.max_bytes):
             return "request.too_large", status.HTTP_413_CONTENT_TOO_LARGE
         session = scope.get("session") or {}
-        if not isinstance(session.get("csrf"), str):
+        has_csrf = isinstance(session.get("csrf"), str)
+        logged_in = isinstance(session.get("uid"), int)
+        if logged_in and not has_csrf:
             return "csrf.invalid", status.HTTP_403_FORBIDDEN
-        if scope["path"] != "/login" and not isinstance(session.get("uid"), int):
-            return "auth.login_required", status.HTTP_403_FORBIDDEN
+        if not logged_in and (scope["path"] != "/login" or not has_csrf):
+            return "auth.login_required", status.HTTP_401_UNAUTHORIZED
         return None
 
     def _capped(self, receive: Receive) -> Receive:
@@ -337,6 +358,33 @@ class UiGuard:
             return message
 
         return capped
+
+
+def _to_login(scope: Scope) -> Response:
+    """Send a refused, logged-out form submission to the login page: ``HX-Redirect``
+    for HTMX (boosted forms included), else a 303. After login the user returns to the
+    page the form was on (its ``Referer``, when that is a page of this site), since
+    the form's own URL usually only accepts ``POST``. The request body is never read."""
+    headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+    target = "/login"
+    back = _local_referer(headers.get("referer"), headers.get("host"))
+    if back is not None:
+        target = f"/login?next={quote(back, safe='')}"
+    if headers.get("hx-request"):
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED, headers={"HX-Redirect": target})
+    return RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _local_referer(referer: str | None, host: str | None) -> str | None:
+    """The path and query of ``referer`` when it is a page of this site (same host),
+    except the login page itself; else ``None``."""
+    if not referer or not host:
+        return None
+    parts = urlsplit(referer)
+    if parts.netloc != host or parts.path in ("", "/login"):
+        return None
+    path = f"{parts.path}?{parts.query}" if parts.query else parts.path
+    return path if safe_next(path) == path else None
 
 
 # --- Secure cookie over HTTPS ---------------------------------------------------------

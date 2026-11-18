@@ -144,12 +144,31 @@ LOGGED_IN: dict[str, object] = {"csrf": "token", "uid": 1}
 
 async def test_guard_refuses_before_reading_the_body() -> None:
     status, headers, read = await _guard("POST", {}, [b"x" * 50])
-    assert (status, read) == (403, 0)  # no CSRF token in the session
+    assert (status, read) == (303, 0)  # no session at all: to the login page
+    assert (b"location", b"/login") in headers
     assert (b"x-frame-options", b"DENY") in headers
     status, _, read = await _guard("POST", {"csrf": "token"}, [b"x" * 50])
-    assert (status, read) == (403, 0)  # nobody logged in
+    assert (status, read) == (303, 0)  # nobody logged in
+    status, _, read = await _guard("POST", {"uid": 1}, [b"x" * 50])
+    assert (status, read) == (403, 0)  # logged in, but no CSRF token in the session
     status, _, read = await _guard("POST", LOGGED_IN, [b"x"], [(b"content-length", b"101")])
     assert (status, read) == (413, 0)
+
+
+async def test_guard_sends_a_logged_out_submit_back_to_its_page_after_login() -> None:
+    page = [(b"host", b"shop.test"), (b"referer", b"http://shop.test/bind?ean=123")]
+    status, headers, read = await _guard("POST", {}, [b"x" * 50], page)
+    assert (status, read) == (303, 0)
+    assert (b"location", b"/login?next=%2Fbind%3Fean%3D123") in headers
+    # HTMX (boosted forms too): HX-Redirect instead of a redirect HTMX would follow.
+    status, headers, read = await _guard("POST", {}, [b"x"], [*page, (b"hx-request", b"true")])
+    assert (status, read) == (401, 0)
+    assert (b"hx-redirect", b"/login?next=%2Fbind%3Fean%3D123") in headers
+    # A referer from another site, or the login page itself, is not a place to go back to.
+    for referer in (b"https://evil.example/bind", b"http://shop.test/login?next=%2F"):
+        other = [(b"host", b"shop.test"), (b"referer", referer)]
+        _, headers, _ = await _guard("POST", {}, [b"x"], other)
+        assert (b"location", b"/login") in headers
 
 
 async def test_guard_cuts_off_a_streamed_body() -> None:

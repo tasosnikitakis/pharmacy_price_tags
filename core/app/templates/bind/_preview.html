@@ -1,0 +1,15 @@
+<div id="bind-preview" class="bind-preview" data-template="{{ template.value }}">
+  {% if template.value == "promo" and preview.template and preview.template.value != "promo" %}
+  <p class="hint">{{ t("bind.template.promo_inactive") }}</p>
+  {% endif %}
+  {% if preview.label %}
+  <img class="label-preview" id="label-preview" width="{{ row.tag_type.width * 3 }}" height="{{ row.tag_type.height * 3 }}"
+       src="/bind/preview.png?product_id={{ product.id }}&amp;tag_id={{ row.tag.id }}&amp;template={{ template.value }}&amp;v={{ preview.digest }}"
+       alt="{{ t('bind.preview.alt', name=product.name) }}">
+  {% elif preview.refusal %}
+  <p class="flash flash-warning">{{ t("promo.refusal." + preview.refusal) }}</p>
+  {% else %}
+  <p class="flash flash-warning">{{ t(preview.error or "preview.unavailable") }}</p>
+  {% endif %}
+  {% if preview.label and preview.refusal %}<p class="hint">{{ t("promo.refusal." + preview.refusal) }}</p>{% endif %}
+</div>

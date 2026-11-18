@@ -112,6 +112,10 @@ ERROR_CODES: tuple[str, ...] = (
     "import.unreadable",
     "tag.not_found",
     "tag.not_bound",
+    "bind.no_price",
+    "bind.tag_unknown",
+    "bind.template_invalid",
+    "bind.label_failed",
     "job.not_retryable",
     "user.email_invalid",
     "user.exists",
@@ -135,7 +139,7 @@ def error_message(code: str, /, **params: object) -> str:
 
 
 #: Tag statuses on the Tags page (``core.services.admin_queries.TagStatus``).
-TAG_STATUSES = ("up_to_date", "pending", "failed", "dead")
+TAG_STATUSES = ("up_to_date", "pending", "failed", "dead", "no_label")
 #: Product fields an import can change (``core.domain.catalogue.FieldChange.field``).
 IMPORT_FIELDS = ("name", "brand", "pack_qty_milli", "pack_unit")
 
@@ -146,6 +150,7 @@ RUNTIME_KEYS: tuple[str, ...] = (
     *(f"role.{role}" for role in ROLES),
     *(f"job.state.{state}" for state in JOB_STATES),
     *(f"tags.status.{status}" for status in TAG_STATUSES),
+    *(f"bind.progress.{status}" for status in TAG_STATUSES),
     *(f"template.{key.value}" for key in TemplateKey),
     *(f"unit.{unit.value}" for unit in PackUnit),
     *(f"history.kind.{kind.value}" for kind in PriceKind),

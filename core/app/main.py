@@ -55,9 +55,19 @@ def create_app() -> FastAPI:
 def _add_admin_ui(app: FastAPI, session_secret: str) -> None:
     """The admin UI (section 9): its routers, static files, session and error pages."""
     from core.app import web
-    from core.app.routers import ui_auth, ui_import, ui_products, ui_settings, ui_tags
+    from core.app.routers import (
+        ui_audit,
+        ui_auth,
+        ui_bind,
+        ui_dashboard,
+        ui_import,
+        ui_products,
+        ui_settings,
+        ui_tags,
+    )
 
-    for module in (ui_auth, ui_products, ui_import, ui_tags, ui_settings):
+    modules = (ui_auth, ui_dashboard, ui_products, ui_import, ui_tags, ui_bind, ui_audit)
+    for module in (*modules, ui_settings):
         app.include_router(module.router)
     app.mount("/static", StaticFiles(directory=web.APP_DIR / "static"), name="static")
     # Added first, so it runs inside SessionMiddleware and sees the session.

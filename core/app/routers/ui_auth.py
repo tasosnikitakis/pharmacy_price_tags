@@ -1,4 +1,4 @@
-"""Login, logout and the start page."""
+"""Login and logout. The start page, ``/``, is the Dashboard (``ui_dashboard``)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from core.app.web import (
     log_out,
     redirect,
     render,
-    require_user,
     safe_next,
     session_user,
 )
@@ -24,12 +23,6 @@ from core.services.users import authenticate
 log = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(check_csrf)], include_in_schema=False)
-
-
-@router.get("/")
-def home(_: Annotated[object, Depends(require_user)]) -> Response:
-    # The Dashboard (part 2 of workstream E) will live here.
-    return redirect("/products")
 
 
 @router.get("/login")
