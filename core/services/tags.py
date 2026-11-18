@@ -14,6 +14,8 @@ from collections import defaultdict
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
+from typing import Final, Literal
 
 from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.dialects.postgresql import insert
@@ -299,6 +301,19 @@ class BindingError(ValueError):
     """The tag, product or template cannot be bound as asked."""
 
 
+class BindingChanged(BindingError):
+    """The tag's binding is not the one the caller expected (``expect_bound_to``):
+    another bind or unbind committed after the caller looked. Nothing was written."""
+
+
+class _Unchecked(Enum):
+    UNCHECKED = "unchecked"
+
+
+#: ``bind_tag`` default: bind whatever the tag is bound to now.
+UNCHECKED: Final = _Unchecked.UNCHECKED
+
+
 def template_row(session: Session, tag_type_row_id: int, key: TemplateKey) -> Template:
     """The ``template`` row for ``key`` at its current code version on a tag type,
     created if missing. Safe against a concurrent insert of the same row."""
@@ -330,8 +345,14 @@ def bind_tag(
     template: TemplateKey = TemplateKey.STANDARD,
     bound_by: int | None = None,
     pipeline: LabelPipeline = real_label_pipeline,
+    expect_bound_to: int | Literal[_Unchecked.UNCHECKED] | None = UNCHECKED,
 ) -> RefreshResult:
     """Bind a tag to a product (or rebind it), log ``tag.bound`` and refresh its label.
+
+    ``expect_bound_to`` is the product the caller saw the tag bound to (``None`` for
+    unbound). It is compared under the tag lock, so a bind or unbind that committed
+    after the caller looked raises ``BindingChanged`` instead of being overwritten
+    without asking (decision 0017).
 
     The template is the bound *key*; ``effective_template`` still picks ``promo`` or
     ``unit_price`` when the product needs it.
@@ -374,6 +395,8 @@ def bind_tag(
         select(Binding).where(Binding.tag_id == tag_id).execution_options(populate_existing=True)
     ).one_or_none()
     previous = binding.product_id if binding is not None else None
+    if expect_bound_to is not UNCHECKED and previous != expect_bound_to:
+        raise BindingChanged(f"tag {tag_id} is bound to {previous}, not {expect_bound_to}")
     if binding is None:
         binding = Binding(store_id=DEFAULT_STORE_ID, tag_id=tag_id)
         session.add(binding)

@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 
 from core.app.i18n import t
 from core.app.uploads import UploadStore
-from core.db.models import Price, Product, Tag
+from core.db.models import Binding, Price, Product, Tag
 from core.db.session import get_session
 from core.domain.pricing import build_label_data, unassigned_label_data
 from core.render import render
@@ -364,3 +364,8 @@ def test_failed_push_shows_the_greek_reason(db: Session, shop_factory: Callable[
     assert t("bind.progress.failed") in result["finalText"]
     assert t("bind.progress.reason", reason=t("push_error.timeout")) in result["finalText"]
     assert not shop.driver.image_path(shop.vendor_id).exists()
+    # The bind itself was saved; only the push failed.
+    bound = shop.read(
+        lambda db: db.scalars(select(Binding.product_id).where(Binding.tag_id == tag.id)).one()
+    )
+    assert bound == product.id

@@ -59,7 +59,7 @@ from core.services.products import (
     create_product,
     find_by_ean,
 )
-from core.services.tags import BindingError, bind_tag
+from core.services.tags import BindingChanged, BindingError, bind_tag
 
 log = logging.getLogger(__name__)
 
@@ -260,8 +260,13 @@ def confirm(
     try:
         result = bind_tag(
             session, tag_id, product_id, actor=actor(user), now=now, template=chosen,
-            bound_by=user.id, pipeline=pipeline,
+            bound_by=user.id, pipeline=pipeline, expect_bound_to=bound_to,
         )  # fmt: skip
+    except BindingChanged:
+        # A bind or unbind committed between the check above and the tag lock.
+        session.rollback()
+        flash(request, "warning", N_("bind.changed_meanwhile"))
+        return redirect(back)
     except BindingError:
         raise not_found() from None
     session.commit()

@@ -14,9 +14,11 @@ from sqlalchemy import select
 from core.app.formatting import display_tz
 from core.app.i18n import error_message, t
 from core.app.import_messages import row_reason
+from core.app.routers import ui_bind
 from core.db.models import Binding, EventLog, Price, PriceHistory, Product, Tag, UpdateJob
 from core.domain.catalogue import CellError, ean_check_digit, normalise_ean
 from core.render.label import TemplateKey
+from core.services import tags as tag_service
 from core.services.promotions import PromoInput, edit_promo, promo_end
 from core.services.tags import bind_tag
 from shared.tag_types import Palette
@@ -224,6 +226,33 @@ def test_running_promo_makes_promo_the_default(ui: UI) -> None:
         "/bind/preview", params={"product_id": product.id, "tag_id": tag.id, "template": "standard"}
     ).text
     assert 'data-template="standard"' in fragment and "<html" not in fragment
+
+
+def test_a_bind_that_commits_after_the_check_is_asked_again(
+    ui: UI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two people confirm the same unbound tag: the second must be asked, not silently
+    rebind it (decision 0017). The other bind lands between the route's check and the
+    tag lock, which ``bind_tag`` re-checks."""
+    tag_type = add_tag_type_row(ui.db)
+    first = add_product(ui.db, f"Πρώτο {suffix()}", 500)
+    second = add_product(ui.db, f"Δεύτερο {suffix()}", 700)
+    tag = add_tag(ui.db, tag_type)
+    token = ui.as_staff()
+    real_bind = tag_service.bind_tag
+
+    def other_person_binds_first(*args: object, **kwargs: object) -> object:
+        monkeypatch.setattr(ui_bind, "bind_tag", real_bind)
+        real_bind(ui.db, tag.id, first.id, actor="other", now=T0)
+        ui.db.commit()
+        return real_bind(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ui_bind, "bind_tag", other_person_binds_first)
+    r = _confirm(ui, token, second, tag, "standard", rebind="")
+    assert r.status_code == 303 and "/bind?" in r.headers["location"]
+    binding = _binding(ui, tag)
+    assert binding is not None and binding.product_id == first.id
+    assert t("bind.changed_meanwhile") in ui.client.get(r.headers["location"]).text
 
 
 # --- Step 4: progress ----------------------------------------------------------------

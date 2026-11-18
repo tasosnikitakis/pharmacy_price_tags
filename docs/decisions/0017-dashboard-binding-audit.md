@@ -38,6 +38,8 @@ The Tags page uses the same statuses, including a "no label" filter.
 - Rebinding a tag that is already bound always asks first, even for the same
   product. The confirm form carries the binding it was shown, so a binding that
   changed meanwhile is asked again.
+  `bind_tag` compares it under the tag lock (`expect_bound_to`), so this also holds
+  when two people confirm the same tag at once.
 - Templates offered: `unit_price` only when the product has a pack size and unit;
   `promo` never for Rx products, and not on tag types without red. The server
   re-checks the choice.
