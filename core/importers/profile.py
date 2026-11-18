@@ -17,6 +17,7 @@ from core.domain.catalogue import (
     Column,
     ImportRow,
     RejectedRow,
+    fold_text,
     parse_row,
     reject_duplicates,
 )
@@ -30,7 +31,9 @@ from core.importers.csv_file import (
 
 
 def _key(header: str) -> str:
-    return " ".join(header.split()).casefold()
+    """Header names match ignoring case, surrounding and repeated whitespace, a stray
+    byte-order mark and Greek accents (tonos, dialytika)."""
+    return fold_text(header.replace("\ufeff", ""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,13 +116,33 @@ _BARE_INTEGER = re.compile(r"^\d+$")
 _ONE_OR_TWO_DIGITS = re.compile(r"^\d{1,2}$")
 
 
-def _split_decimal_comma(cells: list[str], price_index: int) -> bool:
-    """True when the price cell is a bare integer and the next cell has 1 or 2 digits,
-    the trace an unquoted ``12,90`` leaves in a ``,``-delimited row."""
-    if price_index + 1 >= len(cells):
+#: Columns a stray price fragment can land in unnoticed: text fields, which accept a
+#: bare number. A fragment in a numeric column (pack size) or an unmapped one is left.
+_TEXT_COLUMNS = frozenset({Column.NAME, Column.BRAND})
+
+
+def _split_decimal_comma(
+    cells: list[str],
+    quoted: list[bool],
+    price_index: int,
+    next_column: Column | None,
+    next_header: str,
+) -> bool:
+    """True when a ``,``-delimited row shows the trace of an unquoted ``12,90``.
+
+    All must hold: the price cell and the next cell were both unquoted in the file;
+    the price is a bare integer and the next cell has 1 or 2 digits; and the next
+    column is unnamed in the header (a trailing delimiter) or mapped to a text field
+    (``name`` or ``brand``). A quoted ``"15","30"``, or a VAT or pack column holding
+    ``24`` after the price, is a valid row and is accepted.
+    """
+    after = price_index + 1
+    if after >= len(cells) or quoted[price_index] or quoted[after]:
         return False
-    price, after = cells[price_index].strip(), cells[price_index + 1].strip()
-    return bool(_BARE_INTEGER.match(price) and _ONE_OR_TWO_DIGITS.match(after))
+    if not (_BARE_INTEGER.match(cells[price_index].strip()) and
+            _ONE_OR_TWO_DIGITS.match(cells[after].strip())):  # fmt: skip
+        return False
+    return next_header == "" or next_column in _TEXT_COLUMNS
 
 
 def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
@@ -131,15 +154,18 @@ def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
 
     In a ``,``-delimited file an unquoted decimal comma silently shifts columns, so
     there a row is also rejected when its cell count differs from the header's, or
-    when the price cell is a bare integer followed by a cell of 1 or 2 digits.
+    when it looks like a split price (see ``_split_decimal_comma``).
     """
     table = read_table(data, settings.encoding, settings.delimiter)
     positions = column_positions(table, settings)
     width = len(table.header)
     comma = table.delimiter == ","
     price_index = positions[Column.PRICE]
+    column_at = {index: column for column, index in positions.items()}
+    next_column = column_at.get(price_index + 1)
+    next_header = table.header[price_index + 1] if price_index + 1 < width else ""
     parsed: list[ImportRow | RejectedRow] = []
-    for line, cells in table.rows:
+    for (line, cells), quoted in zip(table.rows, table.quoted, strict=True):
         # With ',' an unquoted decimal comma ("12,90") splits the price into two cells
         # and shifts every column after it, so any width mismatch is suspect.
         too_long = len(cells) > width and any(c.strip() for c in cells[width:])
@@ -148,7 +174,7 @@ def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
                 RejectedRow(line, f"row has {len(cells)} cells but the header has {width}")
             )
             continue
-        if comma and _split_decimal_comma(cells, price_index):
+        if comma and _split_decimal_comma(cells, quoted, price_index, next_column, next_header):
             parsed.append(
                 RejectedRow(
                     line,

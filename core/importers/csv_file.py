@@ -10,7 +10,8 @@ from __future__ import annotations
 import codecs
 import csv
 import io
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 
 #: Encodings an import profile may name. ``None`` in a profile means "detect".
 ENCODINGS = ("utf-8", "cp1253")
@@ -46,12 +47,17 @@ def decode(data: bytes, encoding: str | None = None) -> tuple[str, str]:
     """Decode file bytes, returning ``(text, encoding_used)``.
 
     With ``encoding=None``: a UTF-8 byte-order mark or valid UTF-8 means UTF-8,
-    anything else is read as Windows-1253. A UTF-8 BOM is always dropped. UTF-16 is
+    anything else is read as Windows-1253. A UTF-8 BOM always means UTF-8, even when
+    ``encoding`` names another, and is always dropped. UTF-16 is
     refused with a clear message (some spreadsheet tools save it as "Unicode text").
     """
     if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
         raise ImportFormatError("the file is UTF-16; save it as UTF-8 or Windows-1253 CSV")
-    if encoding is not None:
+    if data.startswith(codecs.BOM_UTF8):
+        # A byte-order mark is proof of UTF-8, whatever the profile says: reading it
+        # as Windows-1253 would turn the BOM into "ï»¿" on the first header cell.
+        candidates = ["utf-8"]
+    elif encoding is not None:
         encoding = canonical_encoding(encoding)
         candidates = [encoding]
     else:
@@ -100,35 +106,94 @@ class Table:
     delimiter: str
     header: list[str]
     rows: list[tuple[int, list[str]]]  # (1-based line number in the file, cells)
+    #: For each row in ``rows``, whether each cell was quoted in the file. Quoting is
+    #: what tells a quoted ``"15","30"`` from an unquoted decimal comma ``15,30``.
+    quoted: list[list[bool]] = field(default_factory=list)
+
+
+_LINE_ENDS = ("\r", "\n")
+
+
+def split_records(text: str, delimiter: str) -> Iterator[tuple[int, list[str], list[bool]]]:
+    """Split CSV text into records of ``(start line, cells, quoted flags)``.
+
+    The usual CSV rules, as Python's ``csv`` module applies them by default: a cell
+    that starts with ``"`` is quoted up to the closing ``"`` (``""`` is a literal quote)
+    and may hold delimiters and line breaks; records end at CRLF, LF or CR outside
+    quotes. Unlike ``csv`` it reports which cells were quoted. Raises
+    ``ImportFormatError`` for a quoted cell that is never closed.
+    """
+    i, n, line = 0, len(text), 1
+    stops = (delimiter, *_LINE_ENDS)
+    while i < n:
+        start_line = line
+        cells: list[str] = []
+        quoted: list[bool] = []
+        while True:
+            if i < n and text[i] == '"':
+                i += 1
+                buf: list[str] = []
+                while True:
+                    if i >= n:
+                        raise ImportFormatError(f"line {start_line}: a quoted cell is not closed")
+                    char = text[i]
+                    if char == '"':
+                        if text.startswith('""', i):
+                            buf.append('"')
+                            i += 2
+                            continue
+                        i += 1
+                        break
+                    if char == "\n" or (char == "\r" and not text.startswith("\r\n", i)):
+                        line += 1
+                    buf.append(char)
+                    i += 1
+                # Text after the closing quote is kept as it is, as ``csv`` does.
+                while i < n and text[i] not in stops:
+                    buf.append(text[i])
+                    i += 1
+                cells.append("".join(buf))
+                quoted.append(True)
+            else:
+                j = i
+                while j < n and text[j] not in stops:
+                    j += 1
+                cells.append(text[i:j])
+                quoted.append(False)
+                i = j
+            if i < n and text[i] == delimiter:
+                i += 1
+                continue
+            if i < n:  # a line end closes the record
+                i += 2 if text.startswith("\r\n", i) else 1
+                line += 1
+            break
+        yield start_line, cells, quoted
 
 
 def read_table(data: bytes, encoding: str | None = None, delimiter: str | None = None) -> Table:
     """Decode and split a CSV file. ``None`` means detect for both settings.
 
     The first non-blank line is the header; blank lines are skipped. Header cells are
-    trimmed. Handles CRLF, LF and quoted cells (a ``,``-delimited export must quote
-    decimal-comma prices, ``"12,90"``).
+    trimmed and lose any byte-order mark. Handles CRLF, LF and quoted cells (a
+    ``,``-delimited export must quote decimal-comma prices, ``"12,90"``).
     """
     text, used_encoding = decode(data, encoding)
     if delimiter is None:
         delimiter = detect_delimiter(text)
     elif delimiter not in DELIMITERS:
         raise ValueError(f"unsupported delimiter {delimiter!r}")
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
     header: list[str] | None = None
     rows: list[tuple[int, list[str]]] = []
-    start = 1
-    try:
-        for cells in reader:
-            line, start = start, reader.line_num + 1
-            if not any(cell.strip() for cell in cells):
-                continue
-            if header is None:
-                header = [cell.strip() for cell in cells]
-            else:
-                rows.append((line, cells))
-    except csv.Error as exc:
-        raise ImportFormatError(f"line {reader.line_num}: {exc}") from None
+    quoted_rows: list[list[bool]] = []
+    for line, cells, quoted in split_records(text, delimiter):
+        if not any(cell.strip() for cell in cells):
+            continue
+        if header is None:
+            header = [cell.replace("\ufeff", "").strip() for cell in cells]
+        else:
+            rows.append((line, cells))
+            quoted_rows.append(quoted)
     if header is None:
         raise ImportFormatError("the file is empty")
-    return Table(used_encoding, delimiter, header, rows)
+    return Table(used_encoding, delimiter, header, rows, quoted_rows)

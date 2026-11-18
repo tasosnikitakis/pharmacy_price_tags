@@ -16,6 +16,8 @@ from core.domain.catalogue import (
     RejectedRow,
     RowStatus,
     build_diff,
+    ean_check_digit,
+    fold_text,
     normalise_ean,
     normalise_text,
     parse_pack,
@@ -143,6 +145,30 @@ def test_parse_pack_rejects(qty: str, unit: str, reason: str) -> None:
         parse_pack(qty, unit)
 
 
+def test_greek_number_order_prices() -> None:
+    """Tasos's rule: '.' thousands and ',' decimals, in Greek order, import exactly;
+    a lone '1.290' is ambiguous and rejected."""
+    assert parse_price_cents("1.290,50") == 129_050
+    assert parse_price_cents("12.345,67") == 1_234_567
+    with pytest.raises(CellError, match="ambiguous"):
+        parse_price_cents("1.290")
+
+
+def test_greek_number_order_pack_sizes() -> None:
+    assert parse_pack("1.000,5 ml") == (1_000_500, PackUnit.MILLILITRE)
+    assert parse_pack("1.000,5", "ml") == (1_000_500, PackUnit.MILLILITRE)
+    with pytest.raises(CellError, match="ambiguous"):
+        parse_pack("1.000", "ml")
+
+
+def test_fold_text_ignores_case_accents_and_whitespace() -> None:
+    # casefold also maps final sigma to sigma, so "Σ" and "ς" match.
+    assert fold_text("  Τιμή   Λιανικής ") == fold_text("ΤΙΜΗ ΛΙΑΝΙΚΗΣ") == "τιμη λιανικησ"
+    assert fold_text("Κωδικός") == fold_text("ΚΩΔΙΚΟΣ")
+    assert fold_text("Ϊ ΐ ϋ") == "ι ι υ"  # dialytika, with and without tonos
+    assert fold_text("Barcode") == "barcode"
+
+
 def test_parse_pack_unit_factor() -> None:
     assert parse_pack_unit("KG") == (PackUnit.GRAM, 1000)
     assert parse_pack_unit("Λίτρο") == (PackUnit.MILLILITRE, 1000)
@@ -151,26 +177,64 @@ def test_parse_pack_unit_factor() -> None:
 # --- EAN and text ---------------------------------------------------------------------
 
 
-def test_normalise_ean_keeps_leading_zeros_and_strips_spaces() -> None:
-    assert normalise_ean(" 0012345678905 ") == "0012345678905"
-    assert normalise_ean("520 1234 567890") == "5201234567890"
-    assert normalise_ean("12345670") == "12345670"
+@pytest.mark.parametrize(
+    ("body", "check"),
+    [
+        ("590123412345", 7),  # GS1's worked EAN-13 example
+        ("400638133393", 1),
+        ("520123456789", 4),
+        ("200000000001", 5),  # in-store prefix 200, as in the synthetic fixture
+        ("000000000000", 0),
+        ("9638507", 4),  # EAN-8
+        ("1234567", 0),
+    ],
+)
+def test_ean_check_digit(body: str, check: int) -> None:
+    assert ean_check_digit(body) == check
+
+
+def test_normalise_ean_accepts_ean13_and_ean8_as_text() -> None:
+    assert normalise_ean("5901234123457") == "5901234123457"
+    assert normalise_ean(" 0012345678905 ") == "0012345678905"  # leading zeros kept
+    assert normalise_ean("520 1234 567894") == "5201234567894"
+    assert normalise_ean("520 1234567894") == "5201234567894"
+    assert normalise_ean("2000000000015") == "2000000000015"
+    assert normalise_ean("96385074") == "96385074"  # EAN-8
+    assert normalise_ean("00000000") == "00000000"
 
 
 @pytest.mark.parametrize(
     ("text", "reason"),
     [
-        ("", "empty"),
-        ("5.20123E+12", "not all digits"),
-        ("52012345678AB", "not all digits"),
-        ("１２３４５６７８", "not all digits"),  # full-width digits
-        ("1234567", "8 to 14"),
-        ("123456789012345", "8 to 14"),
+        ("", "EAN is empty"),
+        ("5.20123E+12", "scientific notation"),
+        ("5,20123E+12", "scientific notation"),
+        ("5201234567894e0", "scientific notation"),
+        ("012345678905", "12 digits \\(UPC-A\\?\\): not padded; use the full EAN-13"),
+        ("12345678901234", "14 digits: an EAN has 8 or 13"),
+        ("123456789", "9 digits: an EAN has 8 or 13"),
+        ("123456789012345", "15 digits"),
+        ("5201234567890", "check digit is 0, expected 4"),
+        ("5901234123450", "check digit is 0, expected 7"),
+        ("96385070", "check digit is 0, expected 4"),
+        ("52012345678AB", "not an EAN; internal codes are not supported yet"),
+        ("ΦΑΡ-10023", "not an EAN; internal codes are not supported yet"),
+        ("1234567", "not an EAN; internal codes"),
+        ("10023", "not an EAN; internal codes"),
+        ("１２３４５６７８", "not an EAN; internal codes"),  # full-width digits
     ],
 )
 def test_normalise_ean_rejects(text: str, reason: str) -> None:
     with pytest.raises(CellError, match=reason):
         normalise_ean(text)
+
+
+def test_normalise_ean_never_pads() -> None:
+    # A 12-digit UPC-A becomes a valid EAN-13 with a leading zero, but that is the
+    # ERP's job; padding here could match the wrong product.
+    assert ean_check_digit("001234567890") == 5
+    with pytest.raises(CellError, match="UPC-A"):
+        normalise_ean("012345678905")
 
 
 def test_normalise_text_collapses_whitespace_and_composes() -> None:

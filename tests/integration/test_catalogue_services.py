@@ -249,7 +249,7 @@ def test_preview_empty_catalogue_lists_new_and_rejected(
 def test_preview_against_catalogue(db: Session, profile: ImportProfile) -> None:
     _seed(db, "2000000000015", "ΆΛΟΗ ΚΡΕΜΑ ΧΕΡΙΩΝ", 1290)  # unchanged price, new fields
     _seed(db, "2000000000022", "ΈΛΑΙΟ ΣΩΜΑΤΟΣ ΉΠΙΟ", 800, manually_changed_at=NOW)
-    gone = _seed(db, "2999999999999", "ΠΑΛΙΟ ΠΡΟΪΟΝ", 100)
+    gone = _seed(db, "2999999999991", "ΠΑΛΙΟ ΠΡΟΪΟΝ", 100)
     _seed(db, "2000000000091", "ΣΙΡΟΠΙ", 700)  # its row is rejected: not missing
     diff = svc.preview_import(db, _synthetic(), "export.csv", profile).diff
 
@@ -376,7 +376,7 @@ def test_import_clears_manual_flag_and_never_deletes(
     db: Session, profile: ImportProfile, fake: FakePricing
 ) -> None:
     in_file = _seed(db, "2000000000022", "ΈΛΑΙΟ ΣΩΜΑΤΟΣ ΉΠΙΟ", 850, manually_changed_at=NOW)
-    not_in_file = _seed(db, "2999999999999", "ΠΑΛΙΟ", 100, manually_changed_at=NOW)
+    not_in_file = _seed(db, "2999999999991", "ΠΑΛΙΟ", 100, manually_changed_at=NOW)
     result = svc.apply_import(db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW)
     assert result.run.counts["manually_changed"] == 1
     assert result.run.counts["missing"] == 1

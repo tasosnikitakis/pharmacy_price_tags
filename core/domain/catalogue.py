@@ -19,10 +19,8 @@ from enum import StrEnum
 
 from core.domain.types import PackUnit
 
-#: Longest EAN/GTIN the ``product.ean`` column holds (GTIN-14).
-EAN_MAX_LEN = 14
-#: Shortest code accepted (EAN-8). Shorter codes are almost always a broken cell.
-EAN_MIN_LEN = 8
+#: Lengths of the EANs accepted: EAN-13 and EAN-8 (small packs).
+EAN_LENGTHS = (8, 13)
 NAME_MAX_LEN = 300
 BRAND_MAX_LEN = 200
 #: ``product.pack_qty_milli`` is a 32-bit integer.
@@ -99,13 +97,17 @@ def parse_price_cents(text: str) -> int:
     return cents
 
 
-def _fold(text: str) -> str:
-    """Case- and accent-insensitive form of ``text`` for matching labels and units."""
-    decomposed = unicodedata.normalize("NFD", text.strip().casefold())
-    return "".join(c for c in decomposed if not unicodedata.combining(c))
+def fold_text(text: str) -> str:
+    """Case-, accent- and whitespace-insensitive form of ``text`` for matching header
+    names and units: Greek tonos and dialytika are dropped (a lower-case header with
+    accents and the same header in capitals without them fold alike), and runs of
+    whitespace become one space."""
+    decomposed = unicodedata.normalize("NFD", text.casefold())
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return " ".join(stripped.split())
 
 
-#: Unit spellings seen in Greek and English exports, folded with ``_fold``, mapped to
+#: Unit spellings seen in Greek and English exports, folded with ``fold_text``, mapped to
 #: the stored unit and the factor from the written unit to that one.
 _UNITS: dict[str, tuple[PackUnit, int]] = {
     **{u: (PackUnit.GRAM, 1) for u in ("g", "gr", "grs", "γρ", "γρμ", "γραμμαρια")},  # noqa: RUF001
@@ -124,7 +126,7 @@ def parse_pack_unit(text: str) -> tuple[PackUnit, int]:
 
     Case, accents and a trailing dot are ignored (upper-case Greek "tem." -> pieces).
     """
-    key = _fold(text).rstrip(".")
+    key = fold_text(text).rstrip(".")
     if key not in _UNITS:
         raise CellError(f"unknown pack unit: {text.strip()!r}")
     return _UNITS[key]
@@ -172,20 +174,42 @@ def parse_pack(qty_text: str, unit_text: str = "") -> tuple[int, PackUnit] | Non
     return milli, unit
 
 
-def normalise_ean(text: str) -> str:
-    """Strip spaces from an EAN cell and check it is 8 to 14 digits.
+_SCIENTIFIC = re.compile(r"^\d+(?:[.,]\d+)?[eE][+-]?\d+$")
 
-    Leading zeros are kept (the EAN is text). The check digit is not verified, so
-    pharmacy-internal codes of that length are accepted. A spreadsheet's scientific
-    notation (``5.20123E+12``) is refused, since the digits are already lost.
+
+def ean_check_digit(body: str) -> int:
+    """GS1 mod-10 check digit for the digits of an EAN without its last digit.
+
+    From the right, digits are weighted 3, 1, 3, ...; the check digit brings the sum
+    up to a multiple of 10. ``"590123412345"`` -> 7 (EAN-13 ``5901234123457``).
+    """
+    total = sum(int(d) * (3 if i % 2 == 0 else 1) for i, d in enumerate(reversed(body)))
+    return (10 - total % 10) % 10
+
+
+def normalise_ean(text: str) -> str:
+    """Strip spaces from an EAN cell and check it is a valid EAN-13 or EAN-8.
+
+    The EAN stays text, so leading zeros are kept; nothing is ever padded. Refused,
+    each with its own reason: a spreadsheet's scientific notation (``5.20123E+12``,
+    the digits are already lost), a 12-digit UPC-A code (the full EAN-13 is needed),
+    other lengths, a wrong GS1 check digit, and anything that is not digits or is
+    shorter than an EAN-8 (an internal pharmacy code; not supported yet).
     """
     cleaned = text.replace("\u00a0", "").replace(" ", "").strip()
     if not cleaned:
         raise CellError("EAN is empty")
-    if not cleaned.isascii() or not cleaned.isdigit():
-        raise CellError(f"EAN is not all digits: {text.strip()!r}")
-    if not EAN_MIN_LEN <= len(cleaned) <= EAN_MAX_LEN:
-        raise CellError(f"EAN must have {EAN_MIN_LEN} to {EAN_MAX_LEN} digits: {cleaned!r}")
+    if _SCIENTIFIC.match(cleaned):
+        raise CellError(f"EAN is in scientific notation, its digits are lost: {cleaned!r}")
+    if not cleaned.isascii() or not cleaned.isdigit() or len(cleaned) < min(EAN_LENGTHS):
+        raise CellError(f"not an EAN; internal codes are not supported yet: {text.strip()!r}")
+    if len(cleaned) == 12:
+        raise CellError(f"12 digits (UPC-A?): not padded; use the full EAN-13: {cleaned!r}")
+    if len(cleaned) not in EAN_LENGTHS:
+        raise CellError(f"{len(cleaned)} digits: an EAN has 8 or 13 digits: {cleaned!r}")
+    expected = ean_check_digit(cleaned[:-1])
+    if int(cleaned[-1]) != expected:
+        raise CellError(f"check digit is {cleaned[-1]}, expected {expected}: {cleaned!r}")
     return cleaned
 
 

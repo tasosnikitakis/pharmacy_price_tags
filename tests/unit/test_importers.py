@@ -18,6 +18,7 @@ from core.importers import (
     parse_import,
     read_table,
 )
+from core.importers.csv_file import split_records
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 SYNTHETIC = FIXTURES / "erp_synthetic_cp1253.csv"
@@ -240,9 +241,9 @@ def test_parse_reports_missing_columns() -> None:
 
 def test_parse_short_and_long_rows() -> None:
     settings = ImportSettings.create({"ean": "ean", "name": "name", "price": "price"})
-    data = b"ean;name;price;note\n20000000;A;1,00\n20000001;B;2,00;x;y\n20000002;C;3,00;;\n"
+    data = b"ean;name;price;note\n20000004;A;1,00\n20000011;B;2,00;x;y\n20000028;C;3,00;;\n"
     parsed = parse_import(data, settings)
-    assert [r.ean for r in parsed.rows] == ["20000000", "20000002"]
+    assert [r.ean for r in parsed.rows] == ["20000004", "20000028"]
     assert [(r.line, r.reason) for r in parsed.rejected] == [
         (3, "row has 5 cells but the header has 4")
     ]
@@ -250,7 +251,7 @@ def test_parse_short_and_long_rows() -> None:
 
 def test_parse_row_missing_price_cell_is_rejected() -> None:
     settings = ImportSettings.create({"ean": "ean", "name": "name", "price": "price"})
-    parsed = parse_import(b"ean;name;price\n20000000;A\n", settings)
+    parsed = parse_import(b"ean;name;price\n20000004;A\n", settings)
     assert parsed.rows == []
     assert parsed.rejected[0].reason == "price is empty"
 
@@ -322,3 +323,123 @@ def test_semicolon_equivalents_still_import() -> None:
         (1290, "Aloe", None),
         (1200, "90", "Oil"),
     ]
+
+
+def test_comma_quoted_integer_and_small_number_are_accepted() -> None:
+    # Both cells quoted: the ERP wrote two values, not one split decimal.
+    data = b'ean,price,name\n2000000000015,"15","30"\n2000000000022,"15",30\n'
+    parsed = parse_import(data, ImportSettings.create(_SIMPLE, delimiter=","))
+    assert parsed.rejected == []
+    assert [(r.regular_cents, r.name) for r in parsed.rows] == [(1500, "30"), (1500, "30")]
+    mapping = {**_SIMPLE, "pack_qty": "pack_qty", "pack_unit": "pack_unit"}
+    data = b'ean,name,price,pack_qty,pack_unit\n2000000000015,Aloe,"15","30",ml\n'
+    parsed = parse_import(data, ImportSettings.create(mapping, delimiter=","))
+    assert [(r.regular_cents, r.pack_qty_milli) for r in parsed.rows] == [(1500, 30_000)]
+
+
+def test_comma_unmapped_vat_column_after_price_is_accepted() -> None:
+    data = "Barcode,Περιγραφή,Τιμή,ΦΠΑ\n2000000000015,Aloe,15,24\n".encode("cp1253")
+    mapping = {"ean": "Barcode", "name": "Περιγραφή", "price": "Τιμή"}
+    parsed = parse_import(data, ImportSettings.create(mapping, delimiter=","))
+    assert parsed.rejected == []
+    assert [r.regular_cents for r in parsed.rows] == [1500]
+
+
+def test_comma_mapped_pack_quantity_after_price_is_accepted() -> None:
+    mapping = {**_SIMPLE, "pack_qty": "pack_qty", "pack_unit": "pack_unit"}
+    data = b"ean,name,price,pack_qty,pack_unit\n2000000000015,Aloe,15,30,ml\n"
+    parsed = parse_import(data, ImportSettings.create(mapping, delimiter=","))
+    assert parsed.rejected == []
+    assert [(r.regular_cents, r.pack_qty_milli, r.pack_unit) for r in parsed.rows] == [
+        (1500, 30_000, PackUnit.MILLILITRE)
+    ]
+
+
+# --- Record splitting -----------------------------------------------------------------
+
+
+def test_split_records_reports_quoting() -> None:
+    text = 'a,"b,c",""\r\n"say ""hi""",x\rlast,"two\nlines"\n'
+    assert list(split_records(text, ",")) == [
+        (1, ["a", "b,c", ""], [False, True, True]),
+        (2, ['say "hi"', "x"], [True, False]),
+        (3, ["last", "two\nlines"], [False, True]),
+    ]
+
+
+def test_split_records_matches_csv_module() -> None:
+    import csv
+    import io
+
+    text = SYNTHETIC.read_bytes().decode("cp1253")
+    ours = [cells for _, cells, _ in split_records(text, ";")]
+    theirs = list(csv.reader(io.StringIO(text, newline=""), delimiter=";"))
+    assert ours == theirs
+
+
+def test_split_records_unclosed_quote() -> None:
+    with pytest.raises(ImportFormatError, match="line 2: a quoted cell is not closed"):
+        read_table(b'ean;name\n1;"open\n', delimiter=";")
+
+
+# --- Byte-order mark and Greek headers --------------------------------------------------
+
+_GREEK_HEADER = "Κωδικός;Περιγραφή;Τιμή Λιανικής;Συσκευασία;Μονάδα"
+_GREEK_ROWS = "2000000000015;ΆΛΟΗ ΚΡΕΜΑ;12,90;75;ml\r\n2000000000022;ΈΛΑΙΟ;8,50;200;ml\r\n"
+_GREEK_MAPPING = {
+    "ean": "Κωδικός",
+    "name": "Περιγραφή",
+    "price": "Τιμή Λιανικής",
+    "pack_qty": "Συσκευασία",
+    "pack_unit": "Μονάδα",
+}
+
+
+def _greek_rows(data: bytes, mapping: dict[str, str], **kw: str) -> list[tuple[str, str, int]]:
+    parsed = parse_import(data, ImportSettings.create(mapping, **kw))
+    assert parsed.rejected == []
+    return [(r.ean, r.name, r.regular_cents) for r in parsed.rows]
+
+
+_EXPECTED = [("2000000000015", "ΆΛΟΗ ΚΡΕΜΑ", 1290), ("2000000000022", "ΈΛΑΙΟ", 850)]
+
+
+def test_utf8_bom_with_greek_header() -> None:
+    data = codecs.BOM_UTF8 + (_GREEK_HEADER + "\r\n" + _GREEK_ROWS).encode("utf-8")
+    table = read_table(data)
+    assert table.encoding == "utf-8"
+    assert table.header[0] == "Κωδικός"  # no BOM left on the first header cell
+    assert _greek_rows(data, _GREEK_MAPPING) == _EXPECTED
+
+
+def test_utf8_bom_wins_over_profile_encoding() -> None:
+    data = codecs.BOM_UTF8 + (_GREEK_HEADER + "\r\n" + _GREEK_ROWS).encode("utf-8")
+    assert read_table(data, encoding="cp1253").header[0] == "Κωδικός"
+    assert _greek_rows(data, _GREEK_MAPPING, encoding="cp1253") == _EXPECTED
+
+
+def test_cp1253_with_greek_header() -> None:
+    data = (_GREEK_HEADER + "\r\n" + _GREEK_ROWS).encode("cp1253")
+    table = read_table(data)
+    assert (table.encoding, table.header[0]) == ("cp1253", "Κωδικός")
+    assert _greek_rows(data, _GREEK_MAPPING) == _EXPECTED
+
+
+def test_mapping_without_accents_matches_accented_header() -> None:
+    unaccented = {
+        "ean": "ΚΩΔΙΚΟΣ",
+        "name": "περιγραφη",
+        "price": "  Τιμη   Λιανικης ",
+        "pack_qty": "ΣΥΣΚΕΥΑΣΙΑ",
+        "pack_unit": "μοναδα",
+    }
+    for data in (
+        (_GREEK_HEADER + "\r\n" + _GREEK_ROWS).encode("cp1253"),
+        codecs.BOM_UTF8 + (_GREEK_HEADER + "\r\n" + _GREEK_ROWS).encode("utf-8"),
+    ):
+        assert _greek_rows(data, unaccented) == _EXPECTED
+
+
+def test_mapping_headers_equal_after_folding_are_refused() -> None:
+    with pytest.raises(ValueError, match="same header"):
+        ImportSettings.create({"ean": "Κωδικός", "name": "Τιμή", "price": "ΤΙΜΗ"})
