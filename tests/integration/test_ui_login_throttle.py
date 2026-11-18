@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from core.app.i18n import error_message, t
 from core.app.throttle import account_hash
 from core.app.uploads import UploadStore
-from core.config import get_settings
+from core.config import Settings
 from core.db.models import AppUser, EventLog
 from core.services.users import authenticate
 from tests.integration.test_ui_helpers import (
@@ -33,8 +33,10 @@ from tests.integration.test_ui_helpers import (
 
 pytestmark = pytest.mark.db
 
-ACCOUNT_FREE = get_settings().login_throttle_account_free
-IP_FREE = get_settings().login_throttle_ip_free
+# The defaults, read without building Settings: collecting this module must not need
+# DATABASE_URL (the Windows CI job collects every test, then deselects db ones).
+ACCOUNT_FREE: int = Settings.model_fields["login_throttle_account_free"].default
+IP_FREE: int = Settings.model_fields["login_throttle_ip_free"].default
 WRONG = "not the password at all"
 
 
