@@ -392,7 +392,7 @@ A server-rendered web app, usable on a desktop for catalogue work and on a phone
 - Phone cameras only work in the browser over HTTPS. The runbook must cover serving the app over HTTPS on the private network (for example Tailscale's HTTPS certificates, or Caddy with a local certificate).
 - Fallback without a camera: a USB barcode scanner on a desktop, which types into the same EAN field.
 - Session login with two roles: `admin` (everything) and `staff` (bind, audit, view).
-- UI language is an open question (section 12); keep all strings in one translation file from the start.
+- UI language: Greek only for v1 (decision 0015). All strings live in one translation file with English identifiers as keys (for example `import.preview.title`) and Greek values, so English can be added later as a second file without code changes. Greek formats everywhere: `12,90 €`, dates as `18/11/2026`, times in `Europe/Athens`. Code, logs, docs and error codes stay in English.
 
 ## 10. Milestones
 
@@ -430,7 +430,7 @@ Suggested order while waiting for hardware: M0, M1, M2, M3, M5, then M4 when the
 
 - [ ] Can the pharmacy's ERP export a price list with EAN, name and retail price to a file? A trimmed real sample (20–50 rows, only EAN, name, price and pack columns) is needed as `tests/fixtures/erp_sample.csv` to accept M1.
 - [ ] Which colour variant of the Gicisky tags was ordered (three or four colours)?
-- [ ] UI language: Greek only, or Greek with English?
+- [x] UI language: Greek only for v1, with a translation file keyed by English identifiers so English can be added later (answered 18 November 2026; decision 0015).
 - [ ] Which box will run it in the shop (Raspberry Pi 5 or mini-PC), and where will it sit relative to the pilot shelf?
 - [ ] Where should nightly backups go (for example a Cloudflare R2 bucket)?
 - [ ] Who uses it besides you, and is `admin` plus `staff` enough?
