@@ -12,12 +12,14 @@ from core.domain.pricing import (
     PromoRefused,
     TemplateChoice,
     UnitPrice,
+    apply_price_change,
     build_label_data,
     choose_template,
     effective_template,
     format_price,
     history_rows_for_change,
     lowest_prior_price,
+    next_label_change,
     resolve_prior_price,
     unit_price,
     validate_promo,
@@ -157,6 +159,35 @@ def test_refused_promo_falls_back_to_regular_label() -> None:
         TemplateKey.STANDARD, _product(), price, history, T0 + timedelta(hours=1)
     )
     assert choice == TemplateChoice(TemplateKey.STANDARD, PromoRefusal.NOT_A_DISCOUNT)
+
+
+def test_scheduled_promo_refused_by_later_import_is_removed() -> None:
+    """Regular 10,00 with a promo of 8,00 starting at T0. Three days before, an import
+    lowers regular to 7,90: the promo is now no discount, so it is dropped and never
+    written to history as a shelf price."""
+    old = PriceState(1000, 800, T0, T0 + timedelta(days=40))
+    requested = PriceState(790, 800, T0, T0 + timedelta(days=40))
+    change = apply_price_change(
+        _product(), old, requested, [_point(1000, 60)], T0 - timedelta(days=3),
+        PriceSource.IMPORT,
+    )  # fmt: skip
+    assert change.state == PriceState(790)
+    assert [r.kind for r in change.history_rows] == [PriceKind.REGULAR]
+    assert [e.kind for e in change.events] == ["promo.refused"]
+
+
+def test_changing_promo_clears_manual_prior_price() -> None:
+    old = PriceState(1200, 999, T0, T0 + timedelta(days=7), promo_prior_cents=1200)
+    requested = PriceState(1200, 949, T0, T0 + timedelta(days=7), promo_prior_cents=1200)
+    with pytest.raises(PromoRefused):  # short history and the manual prior was cleared
+        apply_price_change(_product(), old, requested, [_point(1200, 10)], T0, PriceSource.MANUAL)
+
+
+def test_next_label_change() -> None:
+    price = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    assert next_label_change(price, T0 - timedelta(days=1)) == T0
+    assert next_label_change(price, T0) == T0 + timedelta(days=7)
+    assert next_label_change(PriceState(1000), T0) is None
 
 
 def test_promo_label_never_built_without_prior_price() -> None:

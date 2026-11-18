@@ -124,8 +124,32 @@ def test_late_result_from_earlier_claim_is_rejected() -> None:
 def test_admin_retry_creates_fresh_job() -> None:
     dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS, created_at=NOW - timedelta(hours=1))
     tag = TagSnapshot(10, NEW, OLD, desired_hash_changed_at=NOW - timedelta(hours=2))
-    assert admin_retry(tag, dead, NOW) == [CreateJob(10, NEW)]
-    assert admin_retry(TagSnapshot(10, NEW, NEW), dead, NOW) == []
+    assert admin_retry(tag, dead, None, NOW) == [CreateJob(10, NEW)]
+    assert admin_retry(TagSnapshot(10, NEW, NEW), dead, None, NOW) == []
+    queued = _job(JobState.QUEUED, NEW)
+    assert admin_retry(tag, dead, queued, NOW) == []
+
+
+def test_lost_outcome_makes_displayed_hash_unknown_and_reverted_price_is_pushed() -> None:
+    """Tag shows A. Job B is pushed, but the result is lost and the claim goes stale.
+    The price is reverted to A. The tag may physically show B, so A must be pushed."""
+    stale = _job(JobState.CLAIMED, NEW, attempts=1, claimed_at=NOW - timedelta(minutes=6))
+    [t] = reclaim_stale([stale], NOW)
+    assert t.displayed_hash_unknown and t.set_displayed_hash is None
+
+    reverted = TagSnapshot(10, desired_hash=OLD, displayed_hash=None)  # NULLed by caller
+    requeued = _job(JobState.QUEUED, NEW, attempts=1)
+    assert plan_updates([reverted], [requeued]) == [CancelJob(1), CreateJob(10, OLD)]
+
+
+@pytest.mark.parametrize(
+    ("code", "unknown"),
+    [(PushErrorCode.TIMEOUT, True), (PushErrorCode.PROTOCOL, True),
+     (PushErrorCode.NOT_FOUND, False), (PushErrorCode.REJECTED, False)],
+)  # fmt: skip
+def test_failure_codes_that_may_have_landed(code: PushErrorCode, unknown: bool) -> None:
+    job = _job(JobState.CLAIMED, attempts=1, claimed_at=NOW)
+    assert apply_result(job, 1, JobOutcome.FAILED, code, NOW).displayed_hash_unknown is unknown
 
 
 def test_stale_claim_at_max_attempts_is_dead() -> None:

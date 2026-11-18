@@ -11,6 +11,12 @@ they never appear in `docker inspect` or the container environment. The core's
 file. Environment variables still work outside Compose and take precedence. `SESSION_SECRET` and `GATEWAY_TOKEN` must be at least 32 characters; an empty database password is rejected.
 Postgres publishes no port; only the core reaches it, over the Compose network.
 
+**Outside Docker** (cloud sessions, the CI pytest job, Windows development) there is
+no secret file: a `DATABASE_URL` with the password in it is used exactly as given.
+With a secret file, only its trailing newline is removed, and SQLAlchemy URL-escapes
+the password when it renders the URL, so `@`, `/`, `:` and `%` are safe. Giving the
+password both ways is an error.
+
 **Why.** The repository is public. Any default would be a published password that a
 forgotten `.env` would silently put into production.
 

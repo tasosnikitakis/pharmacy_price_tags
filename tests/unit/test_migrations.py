@@ -155,7 +155,10 @@ def test_one_active_job_per_tag(scratch_engine: Engine) -> None:
                 text("INSERT INTO render (hash, tag_type_id, png) VALUES (:h, :tt, '\\x00')"),
                 {"h": h, "tt": tt},
             )
-        insert = text("INSERT INTO update_job (tag_id, render_hash, state) VALUES (:t, :h, :s)")
+        insert = text(
+            "INSERT INTO update_job (tag_id, render_hash, state, created_at)"
+            " VALUES (:t, :h, :s, now())"
+        )
         conn.execute(insert, {"t": tag, "h": h1, "s": "claimed"})
         # Finished jobs do not count towards the limit.
         conn.execute(insert, {"t": tag, "h": h1, "s": "acked"})

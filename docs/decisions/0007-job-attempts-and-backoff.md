@@ -18,6 +18,11 @@ nothing, so an old ack can never close a newer push and vice versa.
 transaction, written explicitly by the caller; database `now()` defaults are only a
 fallback for audit columns.
 
+**Unknown outcome.** E-paper can update even when its confirmation is lost. After a
+stale claim, or a `timeout` or `protocol` failure, the tag's `displayed_hash` is set to
+NULL ("unknown"), so the next pass pushes the current label even if it equals what the
+core last believed was shown. `not_found` and `rejected` keep `displayed_hash`.
+
 **Admin retry.** `admin_retry` creates a fresh job for the tag's current
 `desired_hash`; the dead job stays for the record.
 

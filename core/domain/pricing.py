@@ -96,13 +96,68 @@ class NewPricePoint:
     source: PriceSource
 
 
+@dataclass(frozen=True, slots=True)
+class PriceEvent:
+    """An ``event_log`` row a price change must write (kind and payload)."""
+
+    kind: str  # "promo.prior_set", "promo.prior_cleared", "promo.refused"
+    payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class PriceChange:
+    """Everything one price write must store, computed without I/O."""
+
+    state: PriceState  # the new ``price`` row
+    history_rows: list[NewPricePoint]  # ``price_history`` rows to append, in order
+    events: list[PriceEvent]  # ``event_log`` rows to write
+
+
+def apply_price_change(
+    product: ProductFacts,
+    old: PriceState | None,
+    requested: PriceState,
+    history: Sequence[PricePoint],
+    now: datetime,
+    source: PriceSource,
+) -> PriceChange:
+    """The one entry point for every write to a ``price`` row: import, manual edit,
+    promo edit. Callers store exactly what it returns, in one transaction, with the
+    ``price`` row locked (see ``history_rows_for_change``). Rules, in order:
+
+    1. ``promo_prior_cents``: kept only while the promo is unchanged. If ``requested``
+       changes ``promo_cents``, ``promo_from`` or ``promo_to`` relative to ``old`` (or
+       ends the promo), a carried-over manual prior price is cleared
+       (``promo.prior_cleared``). A newly entered one writes ``promo.prior_set`` with
+       the amount and the promo it belongs to.
+    2. A promo that has not started yet is re-validated with ``validate_promo`` against
+       ``history`` plus the rows this change appends. If it would now be refused (say an
+       import lowered the price inside its 30-day window below the promo price), the
+       promo is removed from ``state`` and a ``promo.refused`` event carries the reason.
+       So a refused promo never reaches ``price_history`` as a shelf price.
+    3. ``history_rows`` come from ``history_rows_for_change(state, now, source)``.
+
+    Raises ``PromoRefused`` when ``requested`` itself adds or changes a promo that
+    ``validate_promo`` refuses: an edit is rejected, not silently dropped.
+    """
+    raise NotImplementedError
+
+
+def next_label_change(price: PriceState, now: datetime) -> datetime | None:
+    """The next moment after ``now`` at which the label for this price changes by
+    itself: ``promo_from`` if it is in the future, else ``promo_to`` if in the future,
+    else ``None``. The reconciler re-computes ``desired_hash`` of the bound tags at
+    that moment, so a scheduled promo appears and ends on time."""
+    raise NotImplementedError
+
+
 def history_rows_for_change(
     new: PriceState, now: datetime, source: PriceSource
 ) -> list[NewPricePoint]:
     """The ``price_history`` rows to append after any write to a ``price`` row.
 
-    The single writer of history, used by imports, manual edits and promo edits alike,
-    so every caller follows the same rules (see ``PricePoint`` for how rows are read).
+    Called only by ``apply_price_change``, so every caller follows the same rules (see
+    ``PricePoint`` for how rows are read).
     Returned in the order they must be inserted:
 
     1. At ``now``: the price in effect now under ``new`` (``promo`` kind if the promo is
@@ -193,11 +248,12 @@ def effective_template(
     """The template to render for a tag bound with template ``bound``, at ``now``.
 
     - A promo is active and ``validate_promo`` accepts it: ``promo``.
-    - A promo is active but refused (e.g. an import lowered the 30-day low below the
-      promo price, or a promo change cleared the manual prior price): the regular
-      template (``unit_price`` if ``unit_price_required``, else ``standard``) with
-      ``promo_refused`` set. The tag shows the regular price, never an unlawful promo;
-      the caller logs ``promo.refused`` once per promo and monitoring lists it.
+    - A promo is active but refused: the regular template (``unit_price`` if
+      ``unit_price_required``, else ``standard``) showing ``price.regular_cents``, with
+      ``promo_refused`` set. The tag never shows an unlawful promo; the caller logs
+      ``promo.refused`` once per promo and monitoring lists it. ``apply_price_change``
+      removes promos that become refused before they start, so this is a safety net:
+      reaching it means a write bypassed ``apply_price_change``.
     - No promo active and ``bound`` is ``promo``: the regular template, no refusal.
     - Otherwise ``bound``; ``unit_price`` wins over ``standard`` when required.
     """

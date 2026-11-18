@@ -79,7 +79,8 @@ class JobResultRequest(_Model):
 
     Violations are rejected with 422 before they reach the state machine. A result
     whose ``attempt`` is not the job's current claim (a late result from a claim that
-    timed out and was handed out again) is rejected with 409 and changes nothing.
+    timed out and was handed out again, or a duplicate) is rejected with 409 and
+    changes nothing; the gateway treats 409 as final and does not retry it.
     """
 
     attempt: int = Field(ge=1, description="The ``attempt`` of the ClaimedJob being reported")

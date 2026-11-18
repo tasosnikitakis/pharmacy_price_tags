@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -123,3 +125,54 @@ def test_empty_database_password_is_rejected(
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl@db:5432/esl")
     with pytest.raises(ValueError, match="empty"):
         DatabaseSettings(_secrets_dir=tmp_path)
+
+
+@pytest.mark.filterwarnings("ignore:directory .* does not exist:UserWarning")
+def test_database_url_with_password_used_as_is_without_secret_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cloud sessions, CI and Windows: no secret file, DATABASE_URL taken verbatim."""
+    from core.config import DatabaseSettings
+
+    url = "postgresql+psycopg://esl:dev-pass@localhost:5432/esl"
+    monkeypatch.chdir(tmp_path)  # no .env
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
+    for secrets_dir in (None, tmp_path / "does-not-exist", tmp_path):  # none, missing, empty
+        settings = DatabaseSettings(_secrets_dir=secrets_dir)
+        assert settings.database_password is None
+        assert settings.database_url.get_secret_value() == url
+
+
+@pytest.mark.parametrize(
+    "password", ["p@ss/w:rd%+#?x", "a%40b", "colon:only", "slash/only", "x@y", "spa ce"]
+)
+def test_secret_file_password_is_escaped_and_newline_stripped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, password: str
+) -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    from core.config import DatabaseSettings
+
+    (tmp_path / "database_password").write_text(password + "\n", encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl@db:5432/esl")
+    monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
+    rendered = DatabaseSettings(_secrets_dir=tmp_path).database_url.get_secret_value()
+
+    parsed = make_url(rendered)
+    assert parsed.password == password  # exact, newline gone, nothing else changed
+    assert (parsed.username, parsed.host, parsed.port, parsed.database) == (
+        "esl", "db", 5432, "esl",
+    )  # fmt: skip
+    # In the URL text the password is escaped: no raw reserved characters, every "%"
+    # starts a %XX escape, and unescaping gives the original back.
+    segment = rendered.split("://", 1)[1].rsplit("@db", 1)[0].split(":", 1)[1]
+    assert not set("@/:") & set(segment)
+    assert re.fullmatch(r"(?:[^%]|%[0-9A-Fa-f]{2})*", segment)
+    assert unquote(segment) == password
+    # What the driver will receive: the raw password as its own argument.
+    engine = create_engine(rendered)
+    _, kwargs = engine.dialect.create_connect_args(engine.url)
+    assert kwargs["password"] == password
+    assert kwargs["host"] == "db"

@@ -33,6 +33,13 @@ Rules:
   explicitly. Database ``now()`` defaults are only a fallback for audit columns.
 - A result is matched to a claim by ``attempt``: a late result from an earlier claim
   of the same job raises ``StaleResult`` and changes nothing.
+- Unknown outcome: e-paper can update even when its confirmation is lost. When a push
+  may have landed but was not confirmed (a stale claim, or a ``timeout`` or
+  ``protocol`` failure), the transition sets ``displayed_hash_unknown`` and the caller
+  sets the tag's ``displayed_hash`` to NULL. The next ``plan_updates`` pass then
+  pushes the current ``desired_hash`` even if it equals the old displayed one, so a
+  tag never keeps an outdated price unnoticed. ``not_found`` and ``rejected`` mean the
+  tag did not take the image; ``displayed_hash`` is kept.
 """
 
 from __future__ import annotations
@@ -104,8 +111,9 @@ class JobTransition:
     """The complete new values of a job's mutable fields after one event.
 
     The caller writes every field to the ``update_job`` row, including ``None``
-    values: ``None`` means "set to NULL", never "unchanged". If ``set_displayed_hash``
-    is not ``None``, the caller also sets the tag's ``displayed_hash`` to it.
+    values: ``None`` means "set to NULL", never "unchanged". For the tag: if
+    ``set_displayed_hash`` is not ``None`` the caller sets ``displayed_hash`` to it; if
+    ``displayed_hash_unknown`` is true it sets ``displayed_hash`` to NULL. Never both.
     """
 
     job_id: int
@@ -117,6 +125,11 @@ class JobTransition:
     error_code: PushErrorCode | None
     error: str | None
     set_displayed_hash: str | None = None
+    displayed_hash_unknown: bool = False
+
+    def __post_init__(self) -> None:
+        if self.set_displayed_hash is not None and self.displayed_hash_unknown:
+            raise ValueError("a transition cannot both set and clear displayed_hash")
 
 
 def plan_updates(
@@ -137,7 +150,8 @@ def plan_updates(
     - Claimed job for another hash: nothing; wait for its result.
 
     Dead-job suppression: if the tag's most recent ``dead`` job (in ``latest_dead``)
-    is for ``desired_hash`` and was created at or after ``desired_hash_changed_at``,
+    is for ``desired_hash`` and was created at or after ``desired_hash_changed_at``
+    (or ``desired_hash_changed_at`` is ``None``: unchanged since before any job),
     nothing is created. It stays visible in monitoring until an admin retries it (``admin_retry``).
     If ``desired_hash`` changed after that job was created (even back to the same
     hash), the dead job is stale and a new job is created.
@@ -171,7 +185,8 @@ def apply_result(
     ``acked`` -> state ``acked``, errors cleared, ``set_displayed_hash = job.render_hash``.
     ``failed`` -> ``failed`` with ``next_attempt_at`` from ``next_attempt_at()``, or
     ``dead`` (``next_attempt_at = None``) at ``MAX_ATTEMPTS``; ``error_code`` and
-    ``error`` recorded. ``claimed_at`` is kept for the record.
+    ``error`` recorded. ``claimed_at`` is kept for the record. A ``timeout`` or
+    ``protocol`` failure also sets ``displayed_hash_unknown``.
 
     Raises ``StaleResult`` unless the job is ``claimed`` with ``attempts == attempt``
     (a late result after a reclaim, or a duplicate). Raises ``ValueError`` if a failure
@@ -202,20 +217,23 @@ def reclaim_stale(jobs: Sequence[JobSnapshot], now: datetime) -> list[JobTransit
     """``claimed`` jobs with ``claimed_at <= now - CLAIM_TIMEOUT``.
 
     Back to ``queued`` (``claimed_at`` and ``gateway_id`` cleared) or, if
-    ``attempts >= MAX_ATTEMPTS``, to ``dead``. ``error_code`` becomes ``timeout``.
+    ``attempts >= MAX_ATTEMPTS``, to ``dead``. ``error_code`` becomes ``timeout`` and
+    ``displayed_hash_unknown`` is set: the lost push may have landed.
     """
     raise NotImplementedError
 
 
-def admin_retry(tag: TagSnapshot, dead_job: JobSnapshot, now: datetime) -> list[Action]:
+def admin_retry(
+    tag: TagSnapshot, dead_job: JobSnapshot, active_job: JobSnapshot | None, now: datetime
+) -> list[Action]:
     """An admin's "retry" on a dead job (Tags page, section 9).
 
     Returns ``[CreateJob(tag.tag_id, tag.desired_hash)]`` when the tag still needs an
     update; the new job starts with ``attempts = 0`` and ``created_at = now``, so dead-job
-    suppression no longer applies. Returns ``[]`` when the tag is up to date or
-    ``desired_hash`` is ``None``. The dead job stays as it is, for the record. Raises
+    suppression no longer applies. Returns ``[]`` when the tag is up to date,
+    ``desired_hash`` is ``None``, or the tag already has an ``active_job``. The dead job
+    stays as it is, for the record. Raises
     ``ValueError`` if ``dead_job`` is not ``dead`` or belongs to another tag. The caller
-    must hold no active job for the tag (the unique index enforces it) and logs
-    ``job.retry`` in ``event_log``.
+    logs ``job.retry`` in ``event_log``.
     """
     raise NotImplementedError

@@ -188,6 +188,7 @@ class TagTypeRow(Base):
     __tablename__ = "tag_type"
     __table_args__ = (
         UniqueConstraint("store_id", "key"),
+        UniqueConstraint("store_id", "vendor", "model"),  # discovery matches on these
         CheckConstraint(_in("palette", PALETTES), name="palette"),
         CheckConstraint("width > 0 AND height > 0", name="size_positive"),
     )
@@ -302,7 +303,9 @@ class UpdateJob(Base):
     error_code: Mapped[str | None] = mapped_column(String(32))
     error: Mapped[str | None] = mapped_column(Text)
     gateway_id: Mapped[int | None] = mapped_column(ForeignKey("gateway.id"))
-    created_at: Mapped[datetime] = _now()
+    # No database default: the reconciler compares it with tag.desired_hash_changed_at,
+    # so the caller always writes its own ``now`` (one clock, see core.domain.reconciler).
+    created_at: Mapped[datetime]
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
 

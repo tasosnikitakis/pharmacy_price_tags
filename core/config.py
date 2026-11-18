@@ -61,9 +61,17 @@ class DatabaseSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _merge_password(self) -> DatabaseSettings:
+        """Add the secret-file password to a URL that has none.
+
+        Outside Docker (cloud sessions, CI, Windows development) there is no secret
+        file, and ``DATABASE_URL`` is used exactly as given. With a secret file, only
+        the trailing newline is removed (``echo`` and editors add one); the password is
+        then URL-escaped by SQLAlchemy when the URL is rendered, so ``@ / : %`` and
+        other reserved characters are safe.
+        """
         if self.database_password is None:
             return self
-        password = self.database_password.get_secret_value().strip()
+        password = self.database_password.get_secret_value().rstrip("\r\n")
         if not password:
             raise ValueError("database_password is empty")
         url = make_url(self.database_url.get_secret_value())

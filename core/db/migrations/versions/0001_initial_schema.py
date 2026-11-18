@@ -179,6 +179,9 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_tag_type")),
         sa.UniqueConstraint("store_id", "key", name=op.f("uq_tag_type_store_id_key")),
+        sa.UniqueConstraint(
+            "store_id", "vendor", "model", name=op.f("uq_tag_type_store_id_vendor_model")
+        ),
     )
     op.create_index(op.f("ix_tag_type_store_id"), "tag_type", ["store_id"], unique=False)
     op.create_table(
@@ -411,12 +414,7 @@ def upgrade() -> None:
         sa.Column("error_code", sa.String(length=32), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
         sa.Column("gateway_id", sa.Integer(), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),

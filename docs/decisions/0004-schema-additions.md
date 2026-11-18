@@ -16,6 +16,7 @@ of the plan needs, so workstreams rarely need migrations of their own:
 | `tag_type` | `key` (e.g. `gicisky-2.9-bwr`) | Stable identifier for render hashes and the gateway API |
 | `update_job` | `cancelled` state, `claimed_at`, `error_code`, `created_at`, `updated_at` | Cancel-and-replace; 5-minute claim timeout |
 | `gateway` | `driver` | Shown in monitoring |
+| `tag_type` | unique `(store_id, vendor, model)` | Discovery matches reports on vendor and model |
 
 Rules attached to them:
 
@@ -24,6 +25,8 @@ Rules attached to them:
 - A partial unique index allows at most one active (`queued`, `claimed`, `failed`) job
   per tag. A claimed job is never cancelled; see `core/domain/reconciler.py`.
 - `price_history` and `event_log` are append-only, enforced by a trigger.
+- `update_job.created_at` has no database default: the reconciler compares it with
+  `tag.desired_hash_changed_at`, so the caller writes its own `now` (one clock).
 - The migration seeds store 1 (`Europe/Athens`) and advances the `store` id sequence;
   every `store_id` defaults to 1.
 - `binding.template_id` fixes the template *key*. Rendering always uses the current
