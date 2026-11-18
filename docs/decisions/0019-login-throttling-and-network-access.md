@@ -78,3 +78,12 @@ guesses it.
   the scheme, decision 0016) comes from the proxy's headers and cannot be forged by a
   client. The Dockerfile is not changed yet.
 - A restart of the core clears the throttle counters.
+- Someone who knows a staff email and can reach the login page can keep that account
+  throttled by sending one wrong password each time its delay ends (every 15 minutes
+  once capped). Each key still unlocks, so this is not a lockout, and the network rule
+  above is what keeps such a person out. The runbook's remedy for a staff member who is
+  locked out this way: find the source in `event_log` (`auth.throttled`, its `ip`),
+  deal with it, and restart the core, which clears the counters.
+- If the database is down while a throttle event is written, that request gets a 500
+  instead of 429 and the period's `event_log` row is lost; the WARNING line in the app
+  log is written first, so the event is still recorded there.
