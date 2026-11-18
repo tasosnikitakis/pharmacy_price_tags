@@ -174,8 +174,12 @@ Recommendation for the driver [inferred]: look characteristics up by UUID (`FEF1
 first and fall back to the hass sort rule only if `FEF0` is missing. With bleak, call
 `start_notify` on the command characteristic before the first write. Write with
 `response=False`, unless the characteristic's properties show it lacks
-`write-without-response`. On BlueZ the MTU exchange happens automatically; read
-`client.mtu_size` after connecting and fail early (`protocol`) if it is below 247.
+`write-without-response`. On BlueZ the MTU exchange happens automatically, but bleak's
+`client.mtu_size` reports 23 (with a warning) until the BlueZ backend has acquired the MTU,
+so it is not a reliable check right after `connect()`. Do not fail a push on that value.
+Either acquire the MTU explicitly on BlueZ before reading it, or detect a too-small MTU from
+the tag's behaviour (the same part requested again and again, Q10) and map that to
+`protocol`. [inferred, from bleak's BlueZ backend]
 
 ---
 
@@ -344,8 +348,9 @@ measured (Q3).
 | Panel refresh after `05 08` | Unknown. Three-colour e-paper typically takes 10–30 s; the tag is probably busy and not connectable while refreshing | [inferred] |
 | Re-advertising after an update | Unknown; matters for back-to-back pushes | Q3 |
 
-Budget against `PUSH_TIMEOUT_S = 60`: connect ≤ 15 s, handshake ≤ 5 s, transfer ≤ 30 s,
-leaving margin. With one connection per adapter, pushes to several tags are serialised, which
+Budget against `PUSH_TIMEOUT_S = 60`, phases in order: targeted scan ≤ 8 s, connect ≤ 12 s,
+handshake (START, SIZE, IMAGE START) ≤ 6 s, transfer ≤ 28 s, disconnect ≤ 2 s. That totals
+56 s, leaving 4 s of margin inside the overall limit. With one connection per adapter, pushes to several tags are serialised, which
 fits the "within 2 minutes" acceptance target only for a handful of tags per price edit.
 [inferred]
 
@@ -408,10 +413,10 @@ target]
 ### `push_image(vendor_id, tag_type, png)`
 
 1. Decode the PNG. Check size, mode (palette) and index range against `tag_type` (section 5.3). On a mismatch → `rejected`.
-2. Find the device: a short targeted scan (`BleakScanner.find_device_by_address`, about 10 s) that also yields the current advertisement. Not found → `not_found`.
+2. Find the device and its current advertisement with a short targeted scan (≤ 8 s, see section 6). `BleakScanner.find_device_by_address` returns only the `BLEDevice`, not the advertisement, so use `BleakScanner.find_device_by_filter` with a filter that matches the address and keeps the `AdvertisementData` it is called with, or `BleakScanner.discover(return_adv=True)`. Not found → `not_found`.
 3. From that advertisement, look up the device ID; if the tag's colours do not match `tag_type.palette`, or bit 14 is clear (compressed panels) → `rejected`. The device ID also selects rotation, mirroring and packing.
 4. Pack the image (section 5) into `payload`.
-5. Connect, look up `FEF1`/`FEF2`, check the MTU, subscribe to notifications (section 3).
+5. Connect, look up `FEF1`/`FEF2`, subscribe to notifications (section 3); see section 3 on the MTU.
 6. Run section 4.1: START (with retries), SIZE (8-byte form), IMAGE START, then the part loop driven by the tag's requests, with a per-reply timeout and a repeated-part limit.
 7. On `05 08` with all parts sent → `ok`.
 8. Always disconnect in a `finally` block, and wrap the whole call in `asyncio.timeout(PUSH_TIMEOUT_S)` (PLAN section 8, reliability). One push at a time per adapter (a driver-level `asyncio.Lock`).
@@ -430,8 +435,9 @@ if not seen → `TagStatus(reachable=False, …None)`. No GATT connection. [infe
 | PNG does not match `tag_type` (size, palette, indices); tag's advertised colours or compression flag do not match what we can send; tag replies `05 xx` with an error status; same part requested more often than the repeat limit; tag rejects SIZE (reply other than `02`) | `rejected` |
 | Malformed or unexpected notification (wrong first byte, too short, `05 08` before all parts were sent, a part index out of range); START size unusable; required characteristics missing; MTU too small; unexpected disconnect mid-transfer; any other `BleakError` during the session | `protocol` |
 
-Whether "PNG does not match `tag_type`" belongs under `rejected` or should be raised as a
-programming error is for the lead to decide; see the report.
+A PNG that does not match `tag_type` (size, palette or index range) is `rejected` without
+contacting the tag. This is part of the `TagDriver.push_image` contract in
+`gateway/drivers/base.py`.
 
 ---
 
@@ -445,7 +451,7 @@ were read, as shown by the repository's history page at that time.
 | S1 | hass-gicisky (Home Assistant custom integration, eigger; archived) | https://github.com/eigger/hass-gicisky | `f144d16b30e59069e1f9e8a1375781fc33e1eefa` (v5.5.1, 2026-09-22); files `custom_components/gicisky/gicisky_ble/{parser,devices,writer}.py`, `manifest.json` | MIT | Advertisement layout and device-ID formula; device-ID list with vendor model names; per-model rotation, mirroring and packing; command sequence and reply checks; 240-byte parts; bit-plane and 2 bpp packing; timeouts and settle delay. Short byte-layout facts only; no code copied. |
 | S2 | hass-ble-esl (successor of S1, eigger), PickSmart protocol module | https://github.com/eigger/hass-ble-esl | `a322b4f8fa8f9e04527259ca3f3e4a7d75cf03d5` (2026-10-08) for `custom_components/ble_esl/esl_ble/picksmart/{const,wire,writer,devices,image}.py`; `docs/models.md` at `main` the same day | MIT | `05 08` = done and `05 00` = next part; alternative service UUIDs; START retry and settle timings with observed answer times; repeated-part limit and back-off; 10 s reply timeout; models marked verified on hardware; manufacturer-ID collision fix. Counted with S1 as one source. |
 | S3 | atc1441, ATC_GICISKY_ESL (information repository) | https://github.com/atc1441/ATC_GICISKY_ESL | `e54fcc94969ac786c92e6a0e7562a3d744e15fb6` (2024-04-25) | GPL-3.0-only (as shown by GitHub; the variant was not checked) | Pointer to the uploader (S4); confirms the reverse engineering is by atc1441 and that PickSmart is the same product. Demo files not used. |
-| S4 | atc1441, ATC1441 BLE E-Paper Uploader (Web Bluetooth page) | https://github.com/atc1441/atc1441.github.io/blob/main/ATC_GICISKY_Paper_Image_Upload.html (the hosted copy at atc1441.github.io was blocked by the session network) | `53f1f63b92e65ad9ad666d9870d789b732adad32` (2025-02-25, "Allow display to set image data message size") | **None stated** (no licence in the repository or the file). Treated as all rights reserved: read for understanding only, nothing copied. | Service and characteristic UUIDs; full reply handling including `05 08` and the abort on other `05 xx`; part size from the START reply; 8-byte SIZE form; hardware-word bit fields and resolution table; mirror-from-panel-type rule; BW and red plane polarity. |
+| S4 | atc1441, ATC1441 BLE E-Paper Uploader (Web Bluetooth page) | https://github.com/atc1441/atc1441.github.io/blob/main/ATC_GICISKY_Paper_Image_Upload.html (the hosted copy at atc1441.github.io was blocked by the session network) | `53f1f63b92e65ad9ad666d9870d789b732adad32` (2025-02-25, "Allow display to set image data message size") | **None stated** (no licence in the repository or the file). Treated as all rights reserved: read for understanding only. No code or text copied; facts only (the resolution-index table in section 1.3 is restated as interoperability facts). | Service and characteristic UUIDs; full reply handling including `05 08` and the abort on other `05 xx`; part size from the START reply; 8-byte SIZE form; hardware-word bit fields and resolution table; mirror-from-panel-type rule; BW and red plane polarity. |
 | S5 | OpenEPaperLink, ESP32 access point firmware, BLE support | https://github.com/OpenEPaperLink/OpenEPaperLink (`ESP32_AP-Flasher/src/ble_filter.cpp`, `ble_writer.cpp`) | `ble_writer.cpp` at `a2a2f22005d5aa5aaff09cf729ef1f6f1a7777c1` (2026-10-21); `ble_filter.cpp` at `df2031b401e05f29bb2c9adbd29982f65daa58c3` (2026-11-02) | **CC-BY-NC-SA-4.0 (non-commercial).** Used only to understand the protocol. No code, no snippets, and no tables copied; everything here is our own wording. | Independent confirmation of the advertisement layout, UUIDs, write without response, 240-byte parts, the `05 08` completion, and bit 14 = no compression. Its readings that differ: 6-byte SIZE form, bit-8 mirroring, strict sequential parts, MTU 255, 30 s silence timeout, 5 s post-connect wait. |
 | S6 | ha-bleep (magicus), Home Assistant integration for PickSmart/Gicisky | https://github.com/magicus/ha-bleep | `main` as of 2026-11-18 (hash not shown on the page) | **None stated** | Nothing usable: the integration code is a stub. README only (296 × 128 the one model marked verified; BW and BWR only). |
 | S7 | hass-gicisky issue tracker, issues #20 and #21 | https://github.com/eigger/hass-gicisky/issues/20, https://github.com/eigger/hass-gicisky/issues/21 | read 2026-11-18 | Discussion, no licence | Look-alike tags under the Gicisky name that use another protocol; field reliability notes (proxies, retries, handshakes of up to about 20 s). |
