@@ -15,8 +15,10 @@ from core.render._palette import Colour
 
 ELLIPSIS = "…"
 
-#: The unit price's digits must be at least this fraction of the selling price's.
+#: The unit price must be at least this fraction of the selling price's character size.
 UNIT_PRICE_MIN_RATIO_NUM, UNIT_PRICE_MIN_RATIO_DEN = 7, 10
+#: Glyphs measured at both sizes for the 70% rule.
+REFERENCE_DIGITS = "0123456789"
 
 
 class Align(Enum):
@@ -268,18 +270,22 @@ def fit_name(
     raise ValueError(f"name does not fit its {box.width}x{box.height} area")
 
 
-def digit_height(text: str, bold: bool, size: int) -> int:
-    """Ink height of the integer digits of a price text ("12" of "12,90 €"): the
-    character size the 70% unit-price rule compares."""
-    digits = text.split(",", 1)[0].strip()
-    _, top, _, bottom = ink_bbox(digits or text, bold, size)
+def reference_digit_height(size: int) -> int:
+    """Bold ink height of ``REFERENCE_DIGITS`` at ``size``: the character size the 70%
+    rule compares. The same glyphs are measured at both sizes, so a label's own digits
+    (round ones overshoot flat ones by a pixel) never tilt the comparison."""
+    _, top, _, bottom = ink_bbox(REFERENCE_DIGITS, True, size)
     return bottom - top
 
 
-def unit_ratio_ok(price_text: str, price_size: int, unit_text: str, unit_size: int) -> bool:
-    price_h = digit_height(price_text, True, price_size)
-    unit_h = digit_height(unit_text, True, unit_size)
-    return unit_h * UNIT_PRICE_MIN_RATIO_DEN >= price_h * UNIT_PRICE_MIN_RATIO_NUM
+def unit_size_ok(price_size: int, unit_size: int) -> bool:
+    """True when a bold unit price at ``unit_size`` is at least 70% of a bold selling
+    price at ``price_size``, both as font sizes and as rendered reference digits."""
+    num, den = UNIT_PRICE_MIN_RATIO_NUM, UNIT_PRICE_MIN_RATIO_DEN
+    return (
+        unit_size * den >= price_size * num
+        and reference_digit_height(unit_size) * den >= reference_digit_height(price_size) * num
+    )
 
 
 def fit_price_with_unit(
@@ -293,7 +299,7 @@ def fit_price_with_unit(
 ) -> list[TextItem]:
     """The selling price, and below it the unit price, both bold and right-aligned in
     ``box``. The price takes the largest size in ``sizes`` at which both fit while the
-    unit price's digits stay at least 70% of the price's. Raises ``ValueError`` if no
+    unit price stays at least 70% of the price (``unit_size_ok``). Raises ``ValueError`` if no
     size fits: a price is never truncated."""
     if unit_text is None:
         return [
@@ -307,10 +313,7 @@ def fit_price_with_unit(
         price_h = price_bbox[3] - price_bbox[1]
         if price_bbox[2] - price_bbox[0] > box.width or price_h + gap > box.height:
             continue
-        unit_size = next(
-            (s for s in sorted(sizes) if unit_ratio_ok(price_text, price_size, unit_text, s)),
-            None,
-        )
+        unit_size = next((s for s in sorted(sizes) if unit_size_ok(price_size, s)), None)
         if unit_size is None or unit_size > price_size:
             continue
         unit_box = Box(box.left, box.top + price_h + gap, box.right, box.bottom)

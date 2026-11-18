@@ -61,11 +61,11 @@ def render(label: LabelData, tag_type: TagType) -> Render:
         tag_type_key=tag_type.key,
         width=tag_type.width,
         height=tag_type.height,
-        png=encode_png(image),
+        png=_encode_png(image),
     )
 
 
-def encode_png(image: Image.Image) -> bytes:
+def _encode_png(image: Image.Image) -> bytes:
     """PNG bytes with every option that affects the output set explicitly: no
     optimisation pass, fixed compression, no metadata chunks. The palette written is
     exactly the image's palette, so its length is the tag's number of colours."""

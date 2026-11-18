@@ -18,15 +18,15 @@ import zlib
 from dataclasses import replace
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from core.db.models import RenderRow, TagTypeRow
 from core.render import TEMPLATE_VERSIONS, LabelData, TemplateKey, label_hash, render
-from core.render._fonts import ink_bbox
-from core.render._layout import ELLIPSIS, TextItem
-from core.render.templates import layout
+from core.render._fonts import font
+from core.render._layout import ELLIPSIS, TextItem, unit_size_ok
+from core.render.templates import PRICE_SIZES, layout
 from core.services.render_store import ensure_render, load_png, save_render
 from shared.tag_types import PALETTE_COLOURS, Palette, TagType
 from tests.golden.cases import BW, BWR, BWRY, CASES, LONG_NAME, LONG_WORD, golden_path
@@ -191,19 +191,33 @@ def test_every_case_renders_deterministically(name: str) -> None:
 # --- the 70% unit-price rule, measured on rendered pixels ---------------------------
 
 
-def _digit_ink_height(image: Image.Image, item: TextItem) -> int:
-    """Height in rendered pixels of the integer digits of a price ("12" of "12,90 €"),
-    measured in the label image within the item's columns for those digits."""
-    digits = item.text.split(",", 1)[0]
-    left, _, right, _ = ink_bbox(digits, item.bold, item.size)
-    pixels = image.load()
-    assert pixels is not None
-    rows = [
-        y
-        for y in range(item.ink.top, item.ink.bottom)
-        if any(pixels[x, y] != 0 for x in range(item.x + left, item.x + right))
-    ]
-    return rows[-1] - rows[0] + 1
+REFERENCE = "0123456789"
+
+
+def _reference_height(size: int) -> int:
+    """Rendered height in pixels of the same reference digits in the bundled bold font
+    at ``size``, drawn and measured here with Pillow (not with the layout's helpers),
+    so both sizes are compared on identical glyphs."""
+    mask = Image.new("1", (size * 12, size * 3), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.fontmode = "1"
+    draw.text((size, size), REFERENCE, fill=1, font=font(True, size), anchor="la")
+    box = mask.getbbox()
+    assert box is not None
+    return box[3] - box[1]
+
+
+def _is_drawn_at_its_size(image: Image.Image, item: TextItem) -> bool:
+    """True when the label's pixels in ``item``'s area are exactly ``item.text`` drawn
+    in bold at ``item.size``: the size the rule is checked at is the size on the tag."""
+    alone = Image.new("1", image.size, 0)
+    draw = ImageDraw.Draw(alone)
+    draw.fontmode = "1"
+    draw.text((item.x, item.y), item.text, fill=1, font=font(item.bold, item.size), anchor="la")
+    crop = (item.ink.left, item.ink.top, item.ink.right, item.ink.bottom)
+    label_ink = [index != 0 for index in image.crop(crop).tobytes()]
+    alone_ink = [bool(value) for value in alone.crop(crop).convert("L").tobytes()]
+    return label_ink == alone_ink and alone.getbbox() == crop
 
 
 PRICE_PAIRS = [
@@ -214,6 +228,10 @@ PRICE_PAIRS = [
     ("999,99 €", "4999,95 €/l"),
     ("999,99 €", "19999,80 €/l"),
     ("1,00 €", "812,50 €/kg"),
+    # Review of PR #7: round digits in the unit price and flat ones in the price made a
+    # 32 px unit price under a 46 px price (69.6%) pass a per-label digit comparison.
+    ("1,98 €", "0,10 €/τεμ."),
+    ("2,72 €", "6,80 €/kg"),
 ]
 
 
@@ -247,12 +265,33 @@ def test_unit_price_is_at_least_70_percent_of_price_and_both_bold(
 ) -> None:
     items = {item.role: item for item in layout(label, tag_type) if isinstance(item, TextItem)}
     price, unit = items["price"], items["unit_price"]
-    assert price.bold and unit.bold
+    # Only booleans and integers reach the assertions: no Greek text in a failure report.
+    both_bold = price.bold and unit.bold
+    assert both_bold
     image = _open(render(label, tag_type).png)
-    price_h = _digit_ink_height(image, price)
-    unit_h = _digit_ink_height(image, unit)
-    assert unit_h * 10 >= price_h * 7, (price_h, unit_h)
-    assert unit_h <= price_h  # the selling price stays the most prominent
+    price_drawn, unit_drawn = (
+        _is_drawn_at_its_size(image, price),
+        _is_drawn_at_its_size(image, unit),
+    )
+    assert price_drawn and unit_drawn
+    price_size, unit_size = price.size, unit.size
+    assert unit_size * 10 >= price_size * 7, (price_size, unit_size)
+    price_h, unit_h = _reference_height(price_size), _reference_height(unit_size)
+    assert unit_h * 10 >= price_h * 7, (price_size, unit_size, price_h, unit_h)
+    assert unit_size <= price_size  # the selling price stays the most prominent
+
+
+@pytest.mark.parametrize("price_size", PRICE_SIZES)
+def test_unit_size_chosen_for_every_price_size_meets_the_70_percent_rule(
+    price_size: int,
+) -> None:
+    """Whatever price size the layout picks, the smallest unit size it then allows is
+    at least 70% of it, in font size and in rendered reference digits."""
+    allowed = [size for size in sorted(PRICE_SIZES) if unit_size_ok(price_size, size)]
+    assert allowed, price_size
+    smallest = allowed[0]
+    assert smallest * 10 >= price_size * 7
+    assert _reference_height(smallest) * 10 >= _reference_height(price_size) * 7
 
 
 # --- names: two lines, shrink, ellipsis, never into the price area ------------------
@@ -339,8 +378,22 @@ def test_promo_on_a_bw_tag_is_refused() -> None:
         LabelData(TemplateKey.PROMO, name="Α", price_text="1,00 €", prior_price_text="2,00 €"),
         LabelData(TemplateKey.UNASSIGNED, short_code="A1"),
         LabelData(TemplateKey.UNASSIGNED, tag_model="gicisky 2.9"),
+        LabelData(TemplateKey.STANDARD, name="   ", price_text="1,00 €"),
+        LabelData(TemplateKey.STANDARD, name="Α", price_text=" "),
+        LabelData(TemplateKey.UNASSIGNED, short_code="\t", tag_model="gicisky 2.9"),
     ],
-    ids=["no-price", "no-name", "no-unit", "no-prior", "no-until", "no-model", "no-code"],
+    ids=[
+        "no-price",
+        "no-name",
+        "no-unit",
+        "no-prior",
+        "no-until",
+        "no-model",
+        "no-code",
+        "blank-name",
+        "blank-price",
+        "blank-code",
+    ],
 )
 def test_missing_required_field_is_refused(label: LabelData) -> None:
     with pytest.raises(ValueError):

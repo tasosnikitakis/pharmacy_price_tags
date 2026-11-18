@@ -68,7 +68,8 @@ class _Grid:
 
 
 def _need(label: LabelData, *names: str) -> None:
-    missing = [name for name in names if not getattr(label, name)]
+    """Raise ``ValueError`` if a field is missing, empty or only whitespace."""
+    missing = [name for name in names if not (getattr(label, name) or "").strip()]
     if missing:
         raise ValueError(f"{label.template.value} label needs {', '.join(missing)}")
 
