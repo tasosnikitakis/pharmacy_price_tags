@@ -20,4 +20,4 @@ RUN useradd --system --uid 10001 esl
 USER esl
 
 EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn core.app.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn --factory core.app.main:create_app --host 0.0.0.0 --port 8000"]

@@ -21,6 +21,17 @@ os.environ.setdefault("GATEWAY_TOKEN", secrets.token_urlsafe(48))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+#: Fixtures that need Postgres. Any test using one is marked ``db`` automatically, so
+#: the Windows CI job (``-m "not db"``) never needs a database.
+DB_FIXTURES = frozenset({"database_url", "migrated_engine", "db"})
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        if DB_FIXTURES & set(getattr(item, "fixturenames", ())):
+            item.add_marker(pytest.mark.db)
+
+
 def alembic_config(database_url: str) -> Config:
     cfg = Config(os.path.join(ROOT, "alembic.ini"))
     cfg.attributes["database_url"] = database_url

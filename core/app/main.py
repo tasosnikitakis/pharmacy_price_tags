@@ -1,4 +1,9 @@
-"""FastAPI application for the core."""
+"""FastAPI application for the core.
+
+There is no module-level ``app``: run it with ``uvicorn --factory
+core.app.main:create_app``. Importing this module then needs no configuration, so tests
+and tools can import it on any machine; settings are checked when the app is created.
+"""
 
 from __future__ import annotations
 
@@ -39,6 +44,3 @@ def create_app() -> FastAPI:
         return Health(status="ok", database="ok", version=VERSION)
 
     return app
-
-
-app = create_app()
