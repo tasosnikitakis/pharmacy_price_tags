@@ -21,7 +21,13 @@ job (acked, failed or dead) keeps the id of the gateway that pushed it.
 **Unbound tags.** A tag with no binding gets the `unassigned` label as its
 `desired_hash`, so a newly discovered tag is queued at once to show its short code.
 
-**Short codes.** Four characters from an alphabet without look-alikes (no 0/O, 1/I/L).
+**Short codes.** Four characters from `ACDEFHJKMNPRTUVWXY34679` (23 characters, about
+280,000 codes), which leaves out look-alikes: 0/O/Q, 1/I/L, 2/Z, 5/S, 8/B and G/6.
+
+**Robustness.** The core starts while Postgres is down: `/health` reports 503, and the
+gateway row is provisioned on the first gateway request instead. In the agent, heartbeat,
+discovery and job processing each run in their own guarded step with their own timer,
+so a failing step never stops the others.
 
 **Fake driver.** It writes `./fake_tags/<vendor_id>.png`, replacing characters outside
 `[A-Za-z0-9._-]` with `_`, because a BLE address with colons is not a valid Windows file
