@@ -14,18 +14,23 @@ reason rather than guessed.
   after this folding are refused.
 - Prices are parsed exactly into cents: decimal comma, `.` as thousands separator.
   Both separators in Greek order import exactly (`1.290,50` → 129050 cents, Tasos's
-  rule). More than two decimals, a negative value, or an ambiguous `1.290` (a lone `.`
+  rule). English order (`1,290.50`) and a thousands group after a leading zero
+  (`0.290,50`) are rejected. More than two decimals, a negative value, or an ambiguous `1.290` (a lone `.`
   followed by exactly three digits) is rejected, never rounded or guessed.
 - A zero price is rejected ("zero price, probably no price in the ERP"): ERP exports
   often use 0 for "no price", and a 0,00 € label would be wrong.
-- Comma-delimited files only: a row whose cell count differs from the header's is
-  rejected. A row is also rejected as a split decimal (`12,90` read as `12` and `90`)
+- Comma-delimited files only: if any data row's cell count differs from the header's,
+  the whole file is refused ("line N has X cells but the header has Y; in comma-delimited
+  files this usually means unquoted decimal commas"). Real exports have consistent
+  widths, and a split decimal adds a cell, so it can only hide in a row that also lost
+  one. In `;` and tab files a too-long row is rejected on its own and a short row is
+  padded with empty cells. A row is also rejected as a split decimal (`12,90` read as `12` and `90`)
   when the price cell and the next cell were both unquoted, the price is a bare integer,
   the next cell has 1–2 digits, and the next column is empty in the header or mapped to
   the name or brand. A quoted price, or a VAT or pack column after the price, is fine.
   `;` and tab files are unaffected. An unclosed quote rejects the file with its line.
-  A row exactly one cell longer than the header with that pattern also counts. Any such
-  row rejects the whole file ("prices look like unquoted decimal commas; re-export with
+  A grouped integer (`1.290` before `50`) counts as the integer part too. Any such row
+  rejects the whole file ("prices look like unquoted decimal commas; re-export with
   quoted prices or a `;` delimiter"), because the same file may contain rows that lost a
   trailing cell and so still match the header width. A `,` file in which every row lost
   its trailing cell cannot be detected; prices in comma files must be quoted.
@@ -41,7 +46,8 @@ reason rather than guessed.
   is X, expected Y"). EAN-8 and in-store codes stay accepted (Tasos, 18 November 2026).
   In-store codes are unique only within one store: two stores may use the same code for
   different products, so multi-store support (M7) must key products by store and code,
-  never by code alone. Whether to support internal codes is still open.
+  never by code alone. All-zero codes (`00000000`, `0000000000000`) are rejected as
+  "probably no barcode". Whether to support internal codes is still open.
 - A mapped header that appears more than once (after folding) rejects the file, naming
   both columns, so a wholesale column can never be read as the retail price.
 - A duplicate EAN rejects every row with that EAN, naming all its lines, because the
@@ -62,7 +68,10 @@ reason rather than guessed.
 **Applying**
 
 - One transaction. Every writer locks in the same order: the `store` row (imports only,
-  which serialises imports), then products, then prices. A product without a price row
+  which serialises imports), then products, then prices, always with `FOR NO KEY
+  UPDATE`. That lock does not conflict with the `FOR KEY SHARE` that foreign-key checks
+  take on every insert, so an edit already running never deadlocks with an import
+  (tested with two real connections). A product without a price row
   is locked before the diff is built, so no concurrent edit can give it one mid-import. Every price write goes through `apply_price_change` with the
   stored promo carried through unchanged; product field changes go through
   `apply_product_change`.
