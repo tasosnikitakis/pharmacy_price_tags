@@ -1,5 +1,5 @@
-"""Database-facing services: load rows, call ``core.domain`` rules, write the results.
+"""Application services: the database-facing side of the domain and renderer.
 
-Services take a ``Session`` and never commit; the caller (a router or a job) owns the
-transaction.
+Services load rows, call ``core.domain`` rules and write the results. They take a
+``Session`` and never commit; the caller (a router or a job) owns the transaction.
 """

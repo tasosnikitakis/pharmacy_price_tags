@@ -6,8 +6,8 @@ All functions are pure. Money is integer cents; datetimes are timezone-aware UTC
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
@@ -68,7 +68,9 @@ def format_price(cents: int) -> str:
     Two decimals, decimal comma, no thousands separator, a space, then the euro sign.
     Raises ``ValueError`` for negative amounts.
     """
-    raise NotImplementedError
+    if cents < 0:
+        raise ValueError(f"price must not be negative: {cents}")
+    return f"{cents // 100},{cents % 100:02d} €"
 
 
 def unit_price(price_cents: int, pack_qty_milli: int, pack_unit: PackUnit) -> UnitPrice:
@@ -80,12 +82,22 @@ def unit_price(price_cents: int, pack_qty_milli: int, pack_unit: PackUnit) -> Un
     Examples: 450 cents for 200 g (200000) -> 2250 cents per kg; 390 cents for 4.8 g
     (4800) -> 81250 cents per kg.
     """
-    raise NotImplementedError
+    if pack_qty_milli <= 0:
+        raise ValueError(f"pack size must be positive: {pack_qty_milli}")
+    if price_cents < 0:
+        raise ValueError(f"price must not be negative: {price_cents}")
+    if pack_unit is PackUnit.PIECE:
+        numerator, basis = price_cents * 1_000, UnitBasis.PIECE
+    else:
+        # 1 kg = 1000 g and 1 l = 1000 ml; pack_qty_milli is in thousandths of a g or ml.
+        numerator = price_cents * 1_000_000
+        basis = UnitBasis.KILOGRAM if pack_unit is PackUnit.GRAM else UnitBasis.LITRE
+    return UnitPrice(_div_round_half_up(numerator, pack_qty_milli), basis)
 
 
 def format_unit_price(unit: UnitPrice) -> str:
     """Format a unit price for a label, e.g. ``"22,50 €/kg"``."""
-    raise NotImplementedError
+    return f"{format_price(unit.cents)}/{_UNIT_SUFFIX[unit.basis]}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,7 +214,75 @@ def apply_price_change(
     override rule of ``PricePoint`` (so rows of a cancelled scheduled promo never lower
     a prior price).
     """
-    raise NotImplementedError
+    _require_aware(now)
+    requested_promo = _promo_of(requested)
+    old_promo = _promo_of(old) if old is not None else None
+    if entered_prior_cents is not None:
+        if entered_prior_cents < 0:
+            raise ValueError(f"prior price must not be negative: {entered_prior_cents}")
+        if requested_promo is None:
+            raise ValueError("a prior price can only be entered for a promo")
+    if requested.regular_cents < 0 or (requested_promo is not None and requested_promo[0] < 0):
+        raise ValueError("prices must not be negative")
+
+    product_id = product.product_id
+    stored_prior = old.promo_prior_cents if old is not None else None
+
+    def without_promo(refusal: PromoRefusal | None) -> PriceChange:
+        """The promo is gone from ``state`` (rules 0, 1a, 1b and 3)."""
+        state = PriceState(requested.regular_cents)
+        events: list[PriceEvent] = []
+        if refusal is not None:
+            payload: dict[str, object] = {"product_id": product_id, "reason": refusal}
+            events.append(PriceEvent("promo.refused", payload))
+        if stored_prior is not None:
+            events.append(PriceEvent("promo.prior_cleared", {"product_id": product_id}))
+        return PriceChange(state, history_rows_for_change(state, now, source), events)
+
+    if requested_promo is None:  # rule 1a
+        return without_promo(None)
+    cents, start, end = requested_promo
+    changed = requested_promo != old_promo
+    if not changed:
+        if end <= now:  # rule 0
+            return without_promo(None)
+        prior = entered_prior_cents if entered_prior_cents is not None else stored_prior
+    else:
+        old_start = old_promo[1] if old_promo is not None else None
+        running = old_promo is not None and old_promo[1] <= now < old_promo[2]
+        if running and start == old_start:  # rule 1b
+            if end <= now:
+                return without_promo(None)
+        else:  # rule 1c
+            if start < now:
+                raise PromoRefused(PromoRefusal.STARTS_IN_PAST)
+            if end <= start:
+                raise PromoRefused(PromoRefusal.INVALID_PERIOD)
+        prior = entered_prior_cents  # rule 2: a carried-over prior price is cleared
+
+    # Rule 3, against the history this change appends (rule 4).
+    state = replace(requested, promo_prior_cents=prior)
+    rows = history_rows_for_change(state, now, source)
+    try:
+        validate_promo(product, state, _extend_history(history, rows))
+    except PromoRefused as refused:
+        if changed:
+            raise
+        return without_promo(refused.reason)
+
+    events: list[PriceEvent] = []
+    if entered_prior_cents is not None:
+        payload: dict[str, object] = {
+            "product_id": product_id,
+            "prior_cents": entered_prior_cents,
+            "promo_cents": cents,
+            "promo_from": _iso_utc(start),
+            "promo_to": _iso_utc(end),
+        }
+        events.append(PriceEvent("promo.prior_set", payload))
+    elif changed and stored_prior is not None:
+        events.append(PriceEvent("promo.prior_cleared", {"product_id": product_id}))
+    return PriceChange(state, rows, events)
 
 
 def apply_product_change(
@@ -224,7 +304,17 @@ def apply_product_change(
     stores the result exactly as for ``apply_price_change``, in the same transaction
     as the product update, with the ``price`` row locked.
     """
-    raise NotImplementedError
+    _require_aware(now)
+    if not new.is_rx or price is None:
+        return None
+    promo = _promo_of(price)
+    if promo is None or promo[2] <= now:
+        return None
+    state = PriceState(price.regular_cents)
+    events = [PriceEvent("promo.ended_rx", {"product_id": new.product_id})]
+    if price.promo_prior_cents is not None:
+        events.append(PriceEvent("promo.prior_cleared", {"product_id": new.product_id}))
+    return PriceChange(state, history_rows_for_change(state, now, PriceSource.MANUAL), events)
 
 
 def next_label_change(price: PriceState, now: datetime) -> datetime | None:
@@ -232,7 +322,15 @@ def next_label_change(price: PriceState, now: datetime) -> datetime | None:
     itself: ``promo_from`` if it is in the future, else ``promo_to`` if in the future,
     else ``None``. The reconciler re-computes ``desired_hash`` of the bound tags at
     that moment, so a scheduled promo appears and ends on time."""
-    raise NotImplementedError
+    promo = _promo_of(price)
+    if promo is None:
+        return None
+    _, start, end = promo
+    if start > now:
+        return start
+    if end > now:
+        return end
+    return None
 
 
 def history_rows_for_change(
@@ -256,7 +354,18 @@ def history_rows_for_change(
     before reading it, then update it and insert these rows in the same transaction,
     so history id order always matches the order of writes to ``price``.
     """
-    raise NotImplementedError
+    promo = _promo_of(new)
+    if promo is not None and promo[1] <= now < promo[2]:
+        rows = [NewPricePoint(promo[0], PriceKind.PROMO, now, source)]
+    else:
+        rows = [NewPricePoint(new.regular_cents, PriceKind.REGULAR, now, source)]
+    if promo is not None:
+        cents, start, end = promo
+        if start > now:
+            rows.append(NewPricePoint(cents, PriceKind.PROMO, start, PriceSource.PROMO))
+        if end > now:
+            rows.append(NewPricePoint(new.regular_cents, PriceKind.REGULAR, end, PriceSource.PROMO))
+    return rows
 
 
 def price_timeline(
@@ -265,7 +374,14 @@ def price_timeline(
     """Resolve history into ``(start, effective_cents, kind)`` segments, sorted by
     start, applying the override rule in ``PricePoint``. Each segment runs until the
     next one starts; the last one is open-ended. Adjacent equal prices are kept."""
-    raise NotImplementedError
+    segments: list[tuple[datetime, int, PriceKind]] = []
+    for point in sorted(history, key=lambda p: p.seq):
+        # The row overrides everything from its valid_from on. Segments stay sorted by
+        # start, so the overridden ones are all at the end.
+        while segments and segments[-1][0] >= point.valid_from:
+            segments.pop()
+        segments.append((point.valid_from, point.effective_cents, point.kind))
+    return segments
 
 
 def lowest_prior_price(history: Sequence[PricePoint], promo_from: datetime) -> int | None:
@@ -277,7 +393,18 @@ def lowest_prior_price(history: Sequence[PricePoint], promo_from: datetime) -> i
     and earlier promo prices count. Returns ``None`` when the timeline starts after the
     window start, because then the lowest price of the previous 30 days is not known.
     """
-    raise NotImplementedError
+    timeline = price_timeline(history)
+    window_start = promo_from - PRIOR_PRICE_WINDOW
+    if not timeline or timeline[0][0] > window_start:
+        return None
+    lowest: int | None = None
+    for index, (start, cents, _) in enumerate(timeline):
+        if start >= promo_from:
+            break
+        if index + 1 < len(timeline) and timeline[index + 1][0] <= window_start:
+            continue  # ended before the window opened
+        lowest = cents if lowest is None else min(lowest, cents)
+    return lowest
 
 
 def resolve_prior_price(history: Sequence[PricePoint], price: PriceState) -> PriorPrice:
@@ -287,7 +414,14 @@ def resolve_prior_price(history: Sequence[PricePoint], price: PriceState) -> Pri
     admin-entered ``price.promo_prior_cents``. Raises ``PromoRefused(NO_PRIOR_PRICE)``
     when neither exists. A promo label is never rendered without a prior price.
     """
-    raise NotImplementedError
+    if price.promo_from is None:
+        raise ValueError("price has no promo")
+    lowest = lowest_prior_price(history, price.promo_from)
+    if lowest is not None:
+        return PriorPrice(lowest, from_history=True)
+    if price.promo_prior_cents is not None:
+        return PriorPrice(price.promo_prior_cents, from_history=False)
+    raise PromoRefused(PromoRefusal.NO_PRIOR_PRICE)
 
 
 def validate_promo(
@@ -306,19 +440,33 @@ def validate_promo(
     promo takes effect (``promo_from``), up to that moment, so a price drop earlier the
     same day counts.
     """
-    raise NotImplementedError
+    if product.is_rx:
+        raise PromoRefused(PromoRefusal.RX_PRODUCT)
+    cents, start, end = price.promo_cents, price.promo_from, price.promo_to
+    if cents is None or start is None or end is None or end <= start:
+        raise PromoRefused(PromoRefusal.INVALID_PERIOD)
+    prior = resolve_prior_price(history, price)
+    if cents >= prior.cents:
+        raise PromoRefused(PromoRefusal.NOT_A_DISCOUNT)
+    if cents >= price.regular_cents:
+        raise PromoRefused(PromoRefusal.NOT_BELOW_REGULAR)
+    return prior
 
 
 def promo_active(price: PriceState, now: datetime) -> bool:
     """True when a promo is set and ``promo_from <= now < promo_to`` (``promo_to`` is
     exclusive)."""
-    raise NotImplementedError
+    if price.promo_cents is None or price.promo_from is None or price.promo_to is None:
+        return False
+    return price.promo_from <= now < price.promo_to
 
 
 def choose_template(product: ProductFacts, price: PriceState, now: datetime) -> TemplateKey:
     """Default template offered when binding: ``promo`` if a promo is active (never for
     Rx), else ``unit_price`` if ``unit_price_required``, else ``standard``."""
-    raise NotImplementedError
+    if not product.is_rx and promo_active(price, now):
+        return TemplateKey.PROMO
+    return _regular_template(product)
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,7 +496,18 @@ def effective_template(
     - No promo active and ``bound`` is ``promo``: the regular template, no refusal.
     - Otherwise ``bound``; ``unit_price`` wins over ``standard`` when required.
     """
-    raise NotImplementedError
+    regular = _regular_template(product)
+    if promo_active(price, now):
+        try:
+            validate_promo(product, price, history)
+        except PromoRefused as refused:
+            return TemplateChoice(regular, refused.reason)
+        return TemplateChoice(TemplateKey.PROMO)
+    if bound is TemplateKey.PROMO:
+        return TemplateChoice(regular)
+    if bound is TemplateKey.STANDARD and product.unit_price_required:
+        return TemplateChoice(TemplateKey.UNIT_PRICE)
+    return TemplateChoice(bound)
 
 
 def build_label_data(
@@ -374,9 +533,100 @@ def build_label_data(
     time and shows ``"30/11"``. Wording around it ("έως") belongs to the template.
     Not for ``unassigned``; use ``unassigned_label_data``.
     """
-    raise NotImplementedError
+    if template is TemplateKey.UNASSIGNED:
+        raise ValueError("use unassigned_label_data for the unassigned template")
+    if template is TemplateKey.STANDARD:
+        return LabelData(
+            template,
+            name=product.name,
+            brand=product.brand,
+            price_text=format_price(price.regular_cents),
+        )
+    if template is TemplateKey.UNIT_PRICE:
+        return LabelData(
+            template,
+            name=product.name,
+            brand=product.brand,
+            price_text=format_price(price.regular_cents),
+            unit_price_text=_unit_price_text(product, price.regular_cents),
+        )
+    prior = validate_promo(product, price, history)
+    cents, end = price.promo_cents, price.promo_to
+    if cents is None or end is None:  # validate_promo has checked; this narrows the types
+        raise PromoRefused(PromoRefusal.INVALID_PERIOD)
+    last_day = (end - timedelta(microseconds=1)).astimezone(DISPLAY_TZ)
+    return LabelData(
+        template,
+        name=product.name,
+        brand=product.brand,
+        price_text=format_price(cents),
+        unit_price_text=_unit_price_text(product, cents) if product.unit_price_required else None,
+        prior_price_text=format_price(prior.cents),
+        promo_until_text=last_day.strftime("%d/%m"),
+    )
 
 
 def unassigned_label_data(short_code: str, tag_model: str) -> LabelData:
     """Label for an unbound tag: its ``short_code`` in large type and the tag model."""
-    raise NotImplementedError
+    return LabelData(TemplateKey.UNASSIGNED, short_code=short_code, tag_model=tag_model)
+
+
+# --- private helpers -------------------------------------------------------------
+
+#: Label suffix after the euro sign for each unit basis ("22,50 €/kg").
+_UNIT_SUFFIX: dict[UnitBasis, str] = {
+    UnitBasis.KILOGRAM: "kg",
+    UnitBasis.LITRE: "l",
+    UnitBasis.PIECE: "τεμ.",
+}
+
+
+def _div_round_half_up(numerator: int, denominator: int) -> int:
+    """``numerator / denominator`` rounded half up, for non-negative integers."""
+    return (2 * numerator + denominator) // (2 * denominator)
+
+
+def _require_aware(when: datetime) -> None:
+    if when.tzinfo is None or when.utcoffset() is None:
+        raise ValueError("datetimes must be timezone-aware")
+
+
+def _iso_utc(when: datetime) -> str:
+    return when.astimezone(UTC).isoformat()
+
+
+def _promo_of(state: PriceState) -> tuple[int, datetime, datetime] | None:
+    """``(promo_cents, promo_from, promo_to)``, ``None`` without a promo.
+
+    Raises ``ValueError`` for a partial promo."""
+    cents, start, end = state.promo_cents, state.promo_from, state.promo_to
+    if cents is None and start is None and end is None:
+        return None
+    if cents is None or start is None or end is None:
+        raise ValueError("a promo needs promo_cents, promo_from and promo_to together")
+    _require_aware(start)
+    _require_aware(end)
+    return cents, start, end
+
+
+def _extend_history(
+    history: Sequence[PricePoint], rows: Sequence[NewPricePoint]
+) -> list[PricePoint]:
+    """``history`` plus ``rows`` as if appended now, with ``seq`` after every row."""
+    seq = max((point.seq for point in history), default=0)
+    extended = list(history)
+    for offset, row in enumerate(rows, start=1):
+        extended.append(
+            PricePoint(seq + offset, row.effective_cents, row.kind, row.valid_from, row.source)
+        )
+    return extended
+
+
+def _regular_template(product: ProductFacts) -> TemplateKey:
+    return TemplateKey.UNIT_PRICE if product.unit_price_required else TemplateKey.STANDARD
+
+
+def _unit_price_text(product: ProductFacts, price_cents: int) -> str:
+    if product.pack_qty_milli is None or product.pack_unit is None:
+        raise ValueError(f"product {product.product_id} has no pack size or unit")
+    return format_unit_price(unit_price(price_cents, product.pack_qty_milli, product.pack_unit))

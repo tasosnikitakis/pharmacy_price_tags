@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from core.db.models import (
@@ -27,7 +26,6 @@ from core.db.models import (
     Price,
     PriceHistory,
     Product,
-    RenderRow,
     Tag,
     TagTypeRow,
     Template,
@@ -43,6 +41,7 @@ from core.domain.types import (
 )
 from core.render.label import Render, TemplateKey
 from core.services.queue import reconcile, tag_type_of
+from core.services.render_store import save_render
 from shared.gateway_api import SeenTagReport, TagsSeenResponse
 from shared.tag_types import TagType
 
@@ -163,7 +162,7 @@ def refresh_desired_hashes(
         rendered = outcome.render
         if rendered.tag_type_key != request.tag_type.key:
             raise ValueError(f"render for tag {tag.id} is for another tag type")
-        _store_render(session, rendered, tag.tag_type_id, now)
+        save_render(session, rendered, tag.tag_type_id)
         if rendered.hash != tag.desired_hash:
             tag.desired_hash = rendered.hash
             tag.desired_hash_changed_at = now
@@ -177,20 +176,6 @@ def refresh_desired_hashes(
     session.flush()
     reconcile(session, now, [t.id for t in tags])
     return result
-
-
-def _store_render(session: Session, rendered: Render, tag_type_id: int, now: datetime) -> None:
-    session.execute(
-        insert(RenderRow)
-        .values(
-            hash=rendered.hash,
-            store_id=DEFAULT_STORE_ID,
-            tag_type_id=tag_type_id,
-            png=rendered.png,
-            created_at=now,
-        )
-        .on_conflict_do_nothing(index_elements=[RenderRow.hash])
-    )
 
 
 def _log_promo_refused(
