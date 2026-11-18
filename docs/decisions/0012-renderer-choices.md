@@ -12,7 +12,15 @@ its hinting drops or fuses the tonos on accented capitals; bold keeps it at all 
 palette and every palette index. PNG bytes can differ between platforms because of
 the zlib bundled with Pillow; pixels cannot. Goldens are tied to the Pillow and FreeType
 versions in `uv.lock`; after a Pillow upgrade they are regenerated deliberately
-(`uv run python -m tests.golden.regenerate`) and reviewed by eye.
+(`uv run python -m tests.golden.regenerate`) and reviewed by eye. The render hash does
+not include the Pillow version, so an upgrade that changes any golden's pixels must also
+bump `TEMPLATE_VERSIONS` for the affected templates; otherwise stored renders, and the
+tags showing them, keep the old pixels (the information on them stays correct).
+
+**Unit price size.** The layout requires both `unit_size * 10 >= price_size * 7` on the
+font sizes and the same 70% on the ink height of the reference digits `0123456789`
+measured at both sizes. Comparing a label's own digits is not enough: round digits
+overshoot flat ones by about a pixel.
 
 **Unit price suffixes.** `€/kg`, `€/l` and `€/τεμ.` (per piece).
 
