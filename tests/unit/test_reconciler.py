@@ -152,3 +152,134 @@ def test_failure_codes_that_may_have_landed(code: PushErrorCode, unknown: bool) 
 def test_stale_claim_at_max_attempts_is_dead() -> None:
     stale = _job(JobState.CLAIMED, attempts=MAX_ATTEMPTS, claimed_at=NOW - timedelta(minutes=6))
     assert [t.state for t in reclaim_stale([stale], NOW)] == [JobState.DEAD]
+
+
+# Beyond the placeholders: edge cases of each rule.
+
+
+def test_up_to_date_or_unset_tag_cancels_queued_and_failed_but_not_claimed() -> None:
+    for state in (JobState.QUEUED, JobState.FAILED):
+        assert plan_updates([TagSnapshot(10, OLD, OLD)], [_job(state, NEW)]) == [CancelJob(1)]
+        assert plan_updates([TagSnapshot(10, None, OLD)], [_job(state, NEW)]) == [CancelJob(1)]
+    claimed = _job(JobState.CLAIMED, NEW, attempts=1, claimed_at=NOW)
+    assert plan_updates([TagSnapshot(10, OLD, OLD)], [claimed]) == []
+
+
+def test_active_job_for_desired_hash_needs_nothing() -> None:
+    for state in (JobState.QUEUED, JobState.CLAIMED, JobState.FAILED):
+        assert plan_updates([TagSnapshot(10, NEW, OLD)], [_job(state, NEW)]) == []
+
+
+def test_failed_job_for_old_hash_is_replaced() -> None:
+    failed = _job(JobState.FAILED, OLD, attempts=2, next_attempt_at=NOW)
+    assert plan_updates([TagSnapshot(10, NEW, None)], [failed]) == [
+        CancelJob(1),
+        CreateJob(10, NEW),
+    ]
+
+
+def test_dead_job_rules() -> None:
+    dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS, created_at=NOW)
+    # Never changed since before any job: suppressed.
+    assert plan_updates([TagSnapshot(10, NEW, OLD)], [], [dead]) == []
+    # Changed at the very moment the dead job was created: still that label, suppressed.
+    assert plan_updates([TagSnapshot(10, NEW, OLD, NOW)], [], [dead]) == []
+    # A dead job for another label does not suppress.
+    other = _job(JobState.DEAD, OLD, attempts=MAX_ATTEMPTS, created_at=NOW)
+    assert plan_updates([TagSnapshot(10, NEW, None, NOW)], [], [other]) == [CreateJob(10, NEW)]
+
+
+def test_plan_updates_checks_its_inputs() -> None:
+    tag = TagSnapshot(10, NEW, OLD)
+    with pytest.raises(ValueError, match="not active"):
+        plan_updates([tag], [_job(JobState.DEAD)])
+    with pytest.raises(ValueError, match="more than one active"):
+        plan_updates([tag], [_job(JobState.QUEUED), _job(JobState.FAILED)])
+    with pytest.raises(ValueError, match="latest_dead"):
+        plan_updates([tag], [], [_job(JobState.ACKED)])
+
+
+def test_plan_handles_many_tags_independently() -> None:
+    tags = [TagSnapshot(1, NEW, OLD), TagSnapshot(2, OLD, OLD), TagSnapshot(3, NEW, None)]
+    queued = JobSnapshot(5, 3, OLD, JobState.QUEUED, 0, None, None, NOW)
+    assert plan_updates(tags, [queued]) == [CreateJob(1, NEW), CancelJob(5), CreateJob(3, NEW)]
+
+
+@pytest.mark.parametrize("state", [s for s in JobState if s is not JobState.QUEUED])
+def test_only_queued_jobs_can_be_claimed(state: JobState) -> None:
+    with pytest.raises(ValueError):
+        claim(_job(state), 1, NOW)
+
+
+def test_failure_records_error_and_keeps_claimed_at() -> None:
+    claimed_at = NOW - timedelta(seconds=30)
+    job = _job(JobState.CLAIMED, attempts=2, claimed_at=claimed_at)
+    t = apply_result(job, 2, JobOutcome.FAILED, PushErrorCode.NOT_FOUND, NOW, error="gone")
+    assert (t.state, t.next_attempt_at, t.claimed_at) == (
+        JobState.FAILED,
+        NOW + BACKOFF[1],
+        claimed_at,
+    )
+    assert (t.error_code, t.error, t.set_displayed_hash) == (PushErrorCode.NOT_FOUND, "gone", None)
+
+
+def test_ack_clears_errors() -> None:
+    t = apply_result(
+        _job(JobState.CLAIMED, attempts=1, claimed_at=NOW), 1, JobOutcome.ACKED, None, NOW
+    )
+    assert (t.error_code, t.error, t.next_attempt_at, t.displayed_hash_unknown) == (
+        None,
+        None,
+        None,
+        False,
+    )
+
+
+def test_result_code_must_match_outcome() -> None:
+    job = _job(JobState.CLAIMED, attempts=1, claimed_at=NOW)
+    with pytest.raises(ValueError):
+        apply_result(job, 1, JobOutcome.FAILED, None, NOW)
+    with pytest.raises(ValueError):
+        apply_result(job, 1, JobOutcome.ACKED, PushErrorCode.TIMEOUT, NOW)
+
+
+@pytest.mark.parametrize("state", [JobState.QUEUED, JobState.ACKED, JobState.DEAD, JobState.FAILED])
+def test_result_for_a_job_that_is_not_claimed_is_stale(state: JobState) -> None:
+    with pytest.raises(StaleResult):
+        apply_result(_job(state, attempts=1), 1, JobOutcome.ACKED, None, NOW)
+
+
+def test_next_attempt_at_needs_a_push() -> None:
+    with pytest.raises(ValueError):
+        next_attempt_at(0, NOW)
+
+
+def test_due_retries_requeue_only_due_failed_jobs() -> None:
+    from core.domain.reconciler import due_retries
+
+    due = JobSnapshot(1, 10, OLD, JobState.FAILED, 2, NOW, NOW - timedelta(minutes=6), NOW)
+    early = JobSnapshot(2, 11, OLD, JobState.FAILED, 2, NOW + timedelta(seconds=1), None, NOW)
+    queued = JobSnapshot(3, 12, OLD, JobState.QUEUED, 0, None, None, NOW)
+    [t] = due_retries([due, early, queued], NOW)
+    assert (t.job_id, t.state, t.attempts, t.next_attempt_at, t.claimed_at) == (
+        1, JobState.QUEUED, 2, None, None,
+    )  # fmt: skip
+
+
+def test_stale_claim_records_timeout() -> None:
+    from core.domain.reconciler import CLAIM_TIMEOUT, STALE_CLAIM_ERROR
+
+    at_limit = _job(JobState.CLAIMED, attempts=1, claimed_at=NOW - CLAIM_TIMEOUT)
+    [t] = reclaim_stale([at_limit, _job(JobState.QUEUED)], NOW)
+    assert (t.error_code, t.error, t.gateway_id) == (PushErrorCode.TIMEOUT, STALE_CLAIM_ERROR, None)
+
+
+def test_admin_retry_checks_its_inputs() -> None:
+    tag = TagSnapshot(10, NEW, OLD)
+    with pytest.raises(ValueError, match="not dead"):
+        admin_retry(tag, _job(JobState.FAILED), None, NOW)
+    other_tag = JobSnapshot(1, 99, NEW, JobState.DEAD, MAX_ATTEMPTS, None, None, NOW)
+    with pytest.raises(ValueError, match="belongs to tag"):
+        admin_retry(tag, other_tag, None, NOW)
+    dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS)
+    assert admin_retry(TagSnapshot(10, None, OLD), dead, None, NOW) == []
