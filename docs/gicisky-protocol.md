@@ -432,8 +432,8 @@ if not seen → `TagStatus(reachable=False, …None)`. No GATT connection. [infe
 | --- | --- |
 | Address not seen in the scan; BlueZ "device not found"; connection refused because the device is gone | `not_found` |
 | Overall 60 s limit hit; connect timed out; no notification within the per-step reply timeout (START after all retries, SIZE, IMAGE START, or a part request) | `timeout` |
-| PNG does not match `tag_type` (size, palette, indices); tag's advertised colours or compression flag do not match what we can send; tag replies `05 xx` with an error status; same part requested more often than the repeat limit; tag rejects SIZE (reply other than `02`) | `rejected` |
-| Malformed or unexpected notification (wrong first byte, too short, `05 08` before all parts were sent, a part index out of range); START size unusable; required characteristics missing; MTU too small; unexpected disconnect mid-transfer; any other `BleakError` during the session | `protocol` |
+| PNG does not match `tag_type` (size, palette, indices); tag's advertised colours or compression flag do not match what we can send; tag replies `05 xx` with an error status; tag rejects SIZE (reply other than `02`) | `rejected` |
+| Malformed or unexpected notification (wrong first byte, too short, `05 08` before all parts were sent, a part index out of range); same part requested more often than the repeat limit (often a too-small MTU, see section 3 and Q10); START size unusable; required characteristics missing; MTU too small; unexpected disconnect mid-transfer; any other `BleakError` during the session | `protocol` |
 
 A PNG that does not match `tag_type` (size, palette or index range) is `rejected` without
 contacting the tag. This is part of the `TagDriver.push_image` contract in
