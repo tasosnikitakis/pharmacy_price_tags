@@ -12,9 +12,10 @@ customer or guest Wi-Fi.
   exist. The IP key is `request.client.host`. A request is refused if either key is
   throttled.
 - For each key, the first `free` failures cost nothing. Each further failure sets the
-  next allowed attempt to `now + min(base * 2**(failures - free), max)`. With the
-  defaults the delays after the 6th, 7th, ... failure on one email are 4, 8, 16, ... s,
-  capped at 15 minutes. Refused attempts are not failures: the password is not checked.
+  next allowed attempt to `now + min(base * 2**(failures - free - 1), max)`, so the
+  first delay is `base` and each further failure doubles it. With the defaults the
+  delays after the 6th, 7th, ... failure on one email are 2, 4, 8 ... 512 s, then the
+  cap of 900 s (15 minutes) from the 15th failure on. Refused attempts are not failures: the password is not checked.
 - Failures are forgotten `window` seconds after the last one, but never before a
   running delay ends. A successful login clears the account key, not the IP key. The
   delay is capped and the key always unlocks: no permanent lockout.
@@ -33,8 +34,9 @@ customer or guest Wi-Fi.
   | `LOGIN_THROTTLE_MAX_SECONDS` | 900 |
   | `LOGIN_THROTTLE_WINDOW_SECONDS` | 3600 |
 
-  `MAX` must be at least `BASE`, and `IP_FREE` at least `ACCOUNT_FREE`. The IP allowance
-  is the larger one because all staff phones in the shop probably share one address
+  `MAX` must be at least `BASE`, and `IP_FREE` must be strictly greater than
+  `ACCOUNT_FREE` (equal values are refused at startup). The IP allowance is the larger
+  one because all staff phones in the shop probably share one address
   behind the router's NAT: one person's typos must not lock the whole shop out.
 - State is in memory, one `LoginThrottle` per app (`app.state.login_throttle`, the
   `ThrottleDep` dependency), behind one lock, with the request's `NowDep` as its clock.

@@ -205,7 +205,7 @@ class Settings(DatabaseSettings):
     login_throttle_base_seconds: int = Field(
         default=2,
         gt=0,
-        description="Delay unit: the n-th failure over the allowance waits base * 2**n",
+        description="First delay; the n-th failure over the allowance waits base * 2**(n - 1)",
     )
     login_throttle_max_seconds: int = Field(
         default=900, gt=0, description="Longest delay; there is no permanent lockout"
@@ -218,8 +218,10 @@ class Settings(DatabaseSettings):
     def _check_login_throttle(self) -> Settings:
         if self.login_throttle_max_seconds < self.login_throttle_base_seconds:
             raise ValueError("login_throttle_max_seconds must be at least the base seconds")
-        if self.login_throttle_ip_free < self.login_throttle_account_free:
-            raise ValueError("login_throttle_ip_free must be at least login_throttle_account_free")
+        if self.login_throttle_ip_free <= self.login_throttle_account_free:
+            raise ValueError(
+                "login_throttle_ip_free must be greater than login_throttle_account_free"
+            )
         return self
 
     @field_validator("session_secret", "gateway_token")

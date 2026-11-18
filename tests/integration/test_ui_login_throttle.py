@@ -91,16 +91,16 @@ def test_throttled_after_repeated_failures(env: Env) -> None:
     fail_until_throttled(c, env.user.email)
     status, headers, text = post(c, env.user.email, PASSWORD)  # the right password
     assert status == 429
-    assert headers["retry-after"] == "4"
-    assert t("login.throttled.seconds", n=4) in text
-    assert "Δοκιμάστε ξανά σε 4 δευτερόλεπτα" in text
+    assert headers["retry-after"] == "2"
+    assert t("login.throttled.seconds", n=2) in text
+    assert "Δοκιμάστε ξανά σε 2 δευτερόλεπτα" in text
     assert c.get("/products", follow_redirects=False).status_code == 303  # not logged in
 
 
 def test_correct_password_works_after_the_delay(env: Env) -> None:
     c = env.client("10.0.0.1")
     fail_until_throttled(c, env.user.email)
-    env.clock.now += timedelta(seconds=3)
+    env.clock.now += timedelta(seconds=1)
     assert post(c, env.user.email, PASSWORD)[0] == 429
     env.clock.now += timedelta(seconds=1)
     status, headers, _ = post(c, env.user.email, PASSWORD)
@@ -121,8 +121,8 @@ def test_success_clears_the_account_but_not_the_ip(env: Env) -> None:
 def test_minutes_in_the_message(env: Env) -> None:
     c = env.client("10.0.0.1")
     fail_until_throttled(c, env.user.email)
-    # Keep failing after each delay until the delay passes a minute (4, 8, 16, 32, 64).
-    for delay in (4, 8, 16, 32):
+    # Keep failing after each delay until the delay passes a minute (2, 4 ... 32, 64).
+    for delay in (2, 4, 8, 16, 32):
         env.clock.now += timedelta(seconds=delay)
         assert post(c, env.user.email, WRONG)[0] == 401
     status, headers, text = post(c, env.user.email, WRONG)
@@ -137,8 +137,8 @@ def test_unknown_email_is_throttled_the_same_way(env: Env) -> None:
     fail_until_throttled(c, unknown)
     status, headers, text = post(c, unknown, WRONG)
     assert status == 429
-    assert headers["retry-after"] == "4"
-    assert t("login.throttled.seconds", n=4) in text
+    assert headers["retry-after"] == "2"
+    assert t("login.throttled.seconds", n=2) in text
 
 
 def test_email_is_normalised_for_the_key(env: Env) -> None:
@@ -169,7 +169,7 @@ def test_many_accounts_from_one_ip_trip_the_ip_key(env: Env) -> None:
         assert post(c, f"guess-{suffix()}@example.test", WRONG)[0] == 401
     status, headers, _ = post(c, env.user.email, PASSWORD)
     assert status == 429
-    assert headers["retry-after"] == "4"
+    assert headers["retry-after"] == "2"
     # The same account from another address still logs in.
     assert post(env.client("192.168.1.11"), env.user.email, PASSWORD)[0] == 303
     kinds = [(r.payload["event"], r.payload["key"]) for r in throttle_rows(env.db)]
@@ -214,11 +214,11 @@ def test_throttle_events_are_logged_without_email_or_password(
         "event": "throttled",
         "key": "account",
         "failures": ACCOUNT_FREE + 1,
-        "delay_seconds": 4,
+        "delay_seconds": 2,
         "ip": "10.0.0.7",
         "account": account_hash(env.user.email),
     }
-    assert refused.payload["delay_seconds"] == 4
+    assert refused.payload["delay_seconds"] == 2
     for row in rows:
         assert row.actor == "system"
         assert row.at == env.clock.now
@@ -238,16 +238,16 @@ def test_a_new_throttle_period_logs_its_first_refusal_again(env: Env) -> None:
     before = {r.id for r in throttle_rows(env.db)}
     fail_until_throttled(c, env.user.email)
     assert post(c, env.user.email, WRONG)[0] == 429
-    env.clock.now += timedelta(seconds=4)
-    assert post(c, env.user.email, WRONG)[0] == 401  # next failure: an 8 s delay
+    env.clock.now += timedelta(seconds=2)
+    assert post(c, env.user.email, WRONG)[0] == 401  # next failure: a 4 s delay
     assert post(c, env.user.email, WRONG)[0] == 429
     assert post(c, env.user.email, WRONG)[0] == 429
     rows = [r for r in throttle_rows(env.db) if r.id not in before]
     assert [(r.payload["event"], r.payload["delay_seconds"]) for r in rows] == [
+        ("throttled", 2),
+        ("refused", 2),
         ("throttled", 4),
         ("refused", 4),
-        ("throttled", 8),
-        ("refused", 8),
     ]
 
 

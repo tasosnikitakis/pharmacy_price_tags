@@ -40,8 +40,8 @@ def test_free_failures_cost_nothing() -> None:
 
 def test_delay_doubles_up_to_the_cap() -> None:
     assert [ACCOUNT.delay_seconds(n) for n in range(1, 6)] == [0, 0, 0, 0, 0]
-    assert [ACCOUNT.delay_seconds(n) for n in range(6, 15)] == [
-        4, 8, 16, 32, 64, 128, 256, 512, 900,
+    assert [ACCOUNT.delay_seconds(n) for n in range(6, 16)] == [
+        2, 4, 8, 16, 32, 64, 128, 256, 512, 900,
     ]  # fmt: skip
     assert ACCOUNT.delay_seconds(10_000) == 900
 
@@ -51,7 +51,7 @@ def test_failures_set_the_next_allowed_attempt() -> None:
     now = T0
     for _ in range(ACCOUNT.free):
         assert kt.record_failure("k", now) is None
-    expected = [4, 8, 16, 32, 64, 128, 256, 512, 900, 900]
+    expected = [2, 4, 8, 16, 32, 64, 128, 256, 512, 900, 900]
     for i, delay in enumerate(expected, start=ACCOUNT.free + 1):
         event = kt.record_failure("k", now)
         assert event == ThrottleEvent("throttled", "account", i, delay)
@@ -65,35 +65,35 @@ def test_refused_while_throttled_and_allowed_after() -> None:
     lt = throttle()
     for _ in range(ACCOUNT.free + 1):
         lt.failure("a", "ip", T0)
-    refusal = lt.check("a", "ip", at(1))
+    refusal = lt.check("a", "ip", at(0.5))
     assert refusal is not None
-    assert refusal.retry_after_seconds == 3
-    assert refusal.events == (ThrottleEvent("refused", "account", 6, 3),)
-    assert lt.check("a", "ip", at(4)) is None
+    assert refusal.retry_after_seconds == 2
+    assert refusal.events == (ThrottleEvent("refused", "account", 6, 2),)
+    assert lt.check("a", "ip", at(2)) is None
 
 
 def test_refusals_are_reported_once_per_throttle_period() -> None:
     lt = throttle()
     for _ in range(ACCOUNT.free + 1):
         lt.failure("a", "ip", T0)
-    first = lt.check("a", "ip", at(1))
-    second = lt.check("a", "ip", at(2))
+    first = lt.check("a", "ip", T0)
+    second = lt.check("a", "ip", at(1))
     assert first is not None and second is not None
     assert len(first.events) == 1
     assert second.events == ()  # still refused, not reported again
-    assert second.retry_after_seconds == 2
+    assert second.retry_after_seconds == 1
     # A new failure starts a new throttle period, whose first refusal is reported.
     lt.failure("a", "ip", at(5))
     third = lt.check("a", "ip", at(6))
     assert third is not None
-    assert third.events == (ThrottleEvent("refused", "account", 7, 7),)
+    assert third.events == (ThrottleEvent("refused", "account", 7, 3),)
 
 
 def test_retry_after_rounds_up_to_whole_seconds() -> None:
     lt = throttle()
     for _ in range(ACCOUNT.free + 1):
         lt.failure("a", "ip", T0)
-    refusal = lt.check("a", "ip", at(3.9))
+    refusal = lt.check("a", "ip", at(1.9))
     assert refusal is not None
     assert refusal.retry_after_seconds == 1
 
@@ -116,9 +116,9 @@ def test_window_never_ends_a_running_delay() -> None:
     policy = ThrottlePolicy(free=1, base_seconds=100, max_seconds=900, window_seconds=10)
     kt = KeyThrottle("account", policy)
     kt.record_failure("k", T0)
-    kt.record_failure("k", T0)  # 200 s delay, longer than the 10 s window
-    assert kt.wait_seconds("k", at(150)) == 50
-    assert kt.wait_seconds("k", at(200)) == 0
+    kt.record_failure("k", T0)  # 100 s delay, longer than the 10 s window
+    assert kt.wait_seconds("k", at(50)) == 50
+    assert kt.wait_seconds("k", at(100)) == 0
     assert "k" not in kt
 
 
@@ -142,7 +142,7 @@ def test_ip_and_account_thresholds_are_independent() -> None:
         assert lt.failure(f"user{i}", "shop", T0) == ()
     assert lt.check("user0", "shop", T0) is None
     events = lt.failure("user-last", "shop", T0)
-    assert events == (ThrottleEvent("throttled", "ip", IP.free + 1, 4),)
+    assert events == (ThrottleEvent("throttled", "ip", IP.free + 1, 2),)
     refusal = lt.check("never-failed", "shop", at(1))
     assert refusal is not None
     assert refusal.events[0].key_type == "ip"
@@ -155,7 +155,7 @@ def test_one_account_from_many_ips_trips_the_account_key() -> None:
     for i in range(ACCOUNT.free):
         lt.failure("a", f"10.0.0.{i}", T0)
     events = lt.failure("a", "10.0.0.99", T0)
-    assert events == (ThrottleEvent("throttled", "account", 6, 4),)
+    assert events == (ThrottleEvent("throttled", "account", 6, 2),)
     refusal = lt.check("a", "10.0.0.200", at(1))
     assert refusal is not None
     assert lt.check("b", "10.0.0.1", at(1)) is None
@@ -283,6 +283,7 @@ def test_settings_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         {"login_throttle_window_seconds": 0},
         {"login_throttle_base_seconds": 10, "login_throttle_max_seconds": 5},
         {"login_throttle_account_free": 10, "login_throttle_ip_free": 5},
+        {"login_throttle_account_free": 7, "login_throttle_ip_free": 7},
     ],
 )
 def test_settings_validation(overrides: dict[str, int]) -> None:
@@ -290,6 +291,8 @@ def test_settings_validation(overrides: dict[str, int]) -> None:
         make_settings(**overrides)
 
 
-def test_settings_allow_equal_ip_and_account_allowance() -> None:
-    settings = make_settings(login_throttle_account_free=7, login_throttle_ip_free=7)
-    assert settings.login_throttle_ip_free == 7
+def test_settings_need_a_larger_ip_allowance() -> None:
+    with pytest.raises(ValidationError, match="greater than"):
+        make_settings(login_throttle_account_free=7, login_throttle_ip_free=7)
+    settings = make_settings(login_throttle_account_free=7, login_throttle_ip_free=8)
+    assert settings.login_throttle_ip_free == 8

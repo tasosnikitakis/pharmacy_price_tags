@@ -8,7 +8,8 @@ Two independent key spaces, each a ``KeyThrottle``:
   probably share one address behind the router's NAT.
 
 For each key, the first ``free`` failures cost nothing. Each further failure sets the
-next allowed attempt to ``now + min(base * 2**(failures - free), max)``. Failures are
+next allowed attempt to ``now + min(base * 2**(failures - free - 1), max)``: the
+first delay is ``base``, and each further failure doubles it. Failures are
 forgotten ``window`` seconds after the last one (and never before a running delay has
 ended). There is no permanent lockout: the delay is capped at ``max``.
 
@@ -68,11 +69,12 @@ class ThrottlePolicy:
             raise ValueError("max_seconds must be at least base_seconds")
 
     def delay_seconds(self, failures: int) -> int:
-        """The delay after the ``failures``-th failure in a row; 0 while still free."""
+        """The delay after the ``failures``-th failure in a row; 0 while still free.
+        The first failure over the allowance waits ``base_seconds``."""
         over = failures - self.free
         if over <= 0:
             return 0
-        delay: int = self.base_seconds * 2 ** min(over, _MAX_EXPONENT)
+        delay: int = self.base_seconds * 2 ** min(over - 1, _MAX_EXPONENT)
         return min(delay, self.max_seconds)
 
 
