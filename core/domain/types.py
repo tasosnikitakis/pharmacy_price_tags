@@ -1,0 +1,80 @@
+"""Plain value types the domain rules work on.
+
+They mirror the database rows the rules need, without depending on SQLAlchemy.
+Money is integer cents; datetimes are timezone-aware UTC.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+
+
+class PackUnit(StrEnum):
+    GRAM = "g"
+    MILLILITRE = "ml"
+    PIECE = "pieces"
+
+
+class UnitBasis(StrEnum):
+    """What a unit price is quoted per."""
+
+    KILOGRAM = "kg"
+    LITRE = "l"
+    PIECE = "piece"
+
+
+class PriceKind(StrEnum):
+    """``price_history.kind``: which price became effective."""
+
+    REGULAR = "regular"
+    PROMO = "promo"
+
+
+class PriceSource(StrEnum):
+    """``price_history.source``: what caused the change."""
+
+    IMPORT = "import"
+    MANUAL = "manual"
+    PROMO = "promo"
+
+
+@dataclass(frozen=True, slots=True)
+class ProductFacts:
+    """The product fields the price and label rules need."""
+
+    product_id: int
+    ean: str
+    name: str
+    brand: str | None
+    pack_qty: int | None
+    pack_unit: PackUnit | None
+    unit_price_required: bool
+    is_rx: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PriceState:
+    """Current price of one product (the ``price`` row).
+
+    A promo is either fully set (``promo_cents``, ``promo_from``, ``promo_to``) or
+    fully absent. ``promo_prior_cents`` is the prior price an admin entered by hand
+    for this promo, used only when there is less than 30 days of history.
+    """
+
+    regular_cents: int
+    promo_cents: int | None = None
+    promo_from: datetime | None = None
+    promo_to: datetime | None = None
+    promo_prior_cents: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PricePoint:
+    """One ``price_history`` row: ``effective_cents`` applied from ``valid_from`` on."""
+
+    effective_cents: int
+    kind: PriceKind
+    valid_from: datetime
+    source: PriceSource

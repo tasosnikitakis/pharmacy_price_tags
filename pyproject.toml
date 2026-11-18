@@ -1,0 +1,71 @@
+[project]
+name = "pharmacy-esl"
+version = "0.1.0"
+description = "Self-hosted electronic shelf label system for one pharmacy"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.9,<3",
+]
+
+[project.optional-dependencies]
+core = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.32,<1",
+    "pydantic-settings>=2.6,<3",
+    "sqlalchemy>=2.0.36,<2.1",
+    "alembic>=1.14,<2",
+    "psycopg[binary]>=3.2,<4",
+    "pillow>=11,<13",
+    "jinja2>=3.1,<4",
+    "python-multipart>=0.0.18",
+]
+gateway = [
+    "httpx>=0.28,<1",
+    "bleak>=0.22,<2",
+]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<2",
+    "httpx>=0.28,<1",
+    "ruff>=0.8,<1",
+    "mypy>=1.13,<2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core", "gateway", "shared"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "DTZ"]
+
+[tool.ruff.lint.per-file-ignores]
+"core/db/migrations/versions/*.py" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["core", "gateway", "shared", "tests"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["bleak.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m 'not hardware'"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "hardware: needs real tags or Bluetooth; skipped by default (run with -m hardware)",
+    "db: needs the Postgres database from DATABASE_URL",
+]
+xfail_strict = true

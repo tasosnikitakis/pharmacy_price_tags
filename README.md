@@ -2,7 +2,7 @@
 
 Self-hosted electronic shelf label (ESL) system for a pharmacy: its own price catalogue, pixel-exact e-paper label rendering, and a hardware-neutral gateway that pushes prices to e-paper tags.
 
-**Status:** planning complete, implementation not started. The build plan is in [`docs/PLAN.md`](docs/PLAN.md).
+**Status:** wave 0 (M0 skeleton and shared contracts) in progress. The build plan is in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## What it does
 
@@ -23,6 +23,17 @@ Two processes on one small Linux box inside the pharmacy:
 ## Stack
 
 Python 3.12 (`uv`), FastAPI, Postgres 16, SQLAlchemy 2 and Alembic, Pillow, `bleak`, Jinja2 with HTMX.
+
+## Development
+
+```bash
+uv sync --all-extras
+cp .env.example .env          # then point DATABASE_URL at your Postgres 16
+uv run alembic upgrade head
+uv run pytest
+uv run ruff check . && uv run mypy
+docker compose up --build     # core + Postgres; GET http://localhost:8000/health
+```
 
 ## For coding agents
 
