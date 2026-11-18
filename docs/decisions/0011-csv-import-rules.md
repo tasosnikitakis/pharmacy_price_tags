@@ -11,6 +11,12 @@ reason rather than guessed.
 - Prices are parsed exactly into cents: decimal comma, `.` as thousands separator.
   More than two decimals, a negative value, or an ambiguous `1.290` (a lone `.` followed
   by exactly three digits) is rejected, never rounded or guessed.
+- A zero price is rejected ("zero price, probably no price in the ERP"): ERP exports
+  often use 0 for "no price", and a 0,00 € label would be wrong.
+- Comma-delimited files only: a row whose cell count differs from the header's is
+  rejected, and so is a row whose price cell is a bare integer followed by a 1–2 digit
+  cell. Both mean an unquoted decimal comma has split the price (`12,90` read as `12`
+  and `90`). Prices in comma files must be quoted. `;` and tab files are unaffected.
 - Pack sizes go to `pack_qty_milli`; kg and l convert exactly to g and ml. Greek and
   English unit spellings are accepted, ignoring case, accents and a trailing dot.
 - EANs: 8 to 14 digits, leading zeros kept, no check-digit test (internal codes pass).
