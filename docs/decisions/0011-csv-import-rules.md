@@ -24,6 +24,12 @@ reason rather than guessed.
   the next cell has 1–2 digits, and the next column is empty in the header or mapped to
   the name or brand. A quoted price, or a VAT or pack column after the price, is fine.
   `;` and tab files are unaffected. An unclosed quote rejects the file with its line.
+  A row exactly one cell longer than the header with that pattern also counts. Any such
+  row rejects the whole file ("prices look like unquoted decimal commas; re-export with
+  quoted prices or a `;` delimiter"), because the same file may contain rows that lost a
+  trailing cell and so still match the header width. A `,` file in which every row lost
+  its trailing cell cannot be detected; prices in comma files must be quoted.
+- Only ASCII digits are accepted in prices, pack sizes and EANs.
 - Pack sizes go to `pack_qty_milli`; kg and l convert exactly to g and ml. Greek and
   English unit spellings are accepted, ignoring case, accents and a trailing dot.
 - EANs are text, never numbers, so leading zeros survive (Tasos, 18 November 2026).
@@ -32,15 +38,32 @@ reason rather than guessed.
   spreadsheet notation such as `5.20123E+12`; internal pharmacy codes ("not an EAN;
   internal codes are not supported yet"); 12-digit codes ("not padded; use the full
   EAN-13"), which are never padded; other lengths; and a wrong check digit ("check digit
-  is X, expected Y"). Whether to support internal codes, and whether in-store codes and
-  EAN-8 stay accepted, are open questions for Tasos.
+  is X, expected Y"). EAN-8 and in-store codes stay accepted (Tasos, 18 November 2026).
+  In-store codes are unique only within one store: two stores may use the same code for
+  different products, so multi-store support (M7) must key products by store and code,
+  never by code alone. Whether to support internal codes is still open.
+- A mapped header that appears more than once (after folding) rejects the file, naming
+  both columns, so a wholesale column can never be read as the retail price.
 - A duplicate EAN rejects every row with that EAN, naming all its lines, because the
   file does not say which row is right.
 
+**Price jumps (Tasos, 18 November 2026)**
+
+- The preview lists every product whose price changes by more than
+  `price_jump_warn_percent` (default 50) either way, strictly:
+  `abs(new - old) * 100 > old * warn_percent`. Rows are never rejected for jumping.
+- When more than `price_jump_banner_percent` (default 20) of the price changes jump,
+  strictly, the preview is marked suspicious (a banner suggesting a wrong column or
+  file), and applying needs `confirm_price_jumps=True`; the confirmation is logged.
+- "Changed rows" means price changes only: rows whose product had a price and gets a
+  different one. Name, brand or pack-only changes and new products are not counted, so
+  they cannot dilute the share and hide a wrong price column.
+
 **Applying**
 
-- One transaction. All the store's `price` rows are locked in `product_id` order, then
-  the matched product rows. Every price write goes through `apply_price_change` with the
+- One transaction. Every writer locks in the same order: the `store` row (imports only,
+  which serialises imports), then products, then prices. A product without a price row
+  is locked before the diff is built, so no concurrent edit can give it one mid-import. Every price write goes through `apply_price_change` with the
   stored promo carried through unchanged; product field changes go through
   `apply_product_change`.
 - Name, brand and pack values from the file overwrite the stored ones. An empty brand or
@@ -48,6 +71,7 @@ reason rather than guessed.
   `unit_price_needs_pack`. Imports never set `is_rx`, `unit_price_required` or `active`;
   new products start with `false`, `false`, `true`.
 - Products missing from the file are listed (active ones only) and never deleted.
+- A zero price is rejected in manual edits too, the same as in imports (Tasos).
 - Applying clears the "manually changed" flag only on products that appear in the file.
 - There is no stored preview: apply re-parses the file and rebuilds the diff under the
   locks, so a catalogue change between preview and apply can change the applied diff.
