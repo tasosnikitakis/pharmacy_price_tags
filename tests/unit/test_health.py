@@ -87,3 +87,28 @@ def test_generated_secrets_pass_validation() -> None:
     from core.gen_secrets import generate
 
     assert all(len(v) >= 32 for v in generate().values())
+
+
+def test_database_password_from_secret_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from core.config import DatabaseSettings
+
+    (tmp_path / "database_password").write_text("s3cret-from-file\n", encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl@db:5432/esl")
+    monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
+    settings = DatabaseSettings(_secrets_dir=tmp_path)
+    assert settings.database_url.get_secret_value() == (
+        "postgresql+psycopg://esl:s3cret-from-file@db:5432/esl"
+    )
+
+
+def test_empty_database_password_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from core.config import DatabaseSettings
+
+    (tmp_path / "database_password").write_text("", encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl@db:5432/esl")
+    with pytest.raises(ValueError, match="empty"):
+        DatabaseSettings(_secrets_dir=tmp_path)

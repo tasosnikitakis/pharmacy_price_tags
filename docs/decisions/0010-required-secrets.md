@@ -1,10 +1,14 @@
 # 0010 Secrets are required and have no defaults
 
-**Decision.** `POSTGRES_PASSWORD`, `DATABASE_URL` (which embeds it), `SESSION_SECRET`
+**Decision.** `POSTGRES_PASSWORD`, `DATABASE_URL` (when it embeds one), `SESSION_SECRET`
 and `GATEWAY_TOKEN` have no default anywhere: not in Compose, not in the settings
 classes, not in `.env.example`. A missing value stops the process. Compose refuses to
-start (`${VAR:?}`), and the core and gateway refuse to start (required pydantic
-fields). `SESSION_SECRET` and `GATEWAY_TOKEN` must be at least 32 characters.
+start, and the core and gateway refuse to start (required pydantic fields).
+Compose passes the three secrets as Compose secrets: files under `/run/secrets`, read
+by Postgres (`POSTGRES_PASSWORD_FILE`) and by the core settings (`secrets_dir`), so
+they never appear in `docker inspect` or the container environment. The core's
+`DATABASE_URL` carries no password; the core adds it from the `database_password`
+file. Environment variables still work outside Compose and take precedence. `SESSION_SECRET` and `GATEWAY_TOKEN` must be at least 32 characters; an empty database password is rejected.
 Postgres publishes no port; only the core reaches it, over the Compose network.
 
 **Why.** The repository is public. Any default would be a published password that a

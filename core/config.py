@@ -6,12 +6,19 @@ Secrets are required and have no defaults: the app refuses to start without them
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 MIN_SECRET_LENGTH = 32
+
+#: Where Docker Compose mounts secret files; each file is named after a field.
+#: Environment variables take precedence over these files.
+_SECRETS_DIR = os.environ.get("SECRETS_DIR", "/run/secrets")
+SECRETS_DIR = _SECRETS_DIR if os.path.isdir(_SECRETS_DIR) else None
 
 
 class ConfigError(RuntimeError):
@@ -40,11 +47,30 @@ def check_secret(value: SecretStr) -> SecretStr:
 class DatabaseSettings(BaseSettings):
     """Only what migrations and database tools need."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", secrets_dir=SECRETS_DIR)
 
     database_url: SecretStr = Field(
-        description="SQLAlchemy URL: postgresql+psycopg://<user>:<password>@<host>:5432/<db>"
+        description="SQLAlchemy URL, e.g. postgresql+psycopg://<user>@<host>:5432/<db>. "
+        "May embed the password, or take it from DATABASE_PASSWORD."
     )
+    database_password: SecretStr | None = Field(
+        default=None,
+        description="Password added to DATABASE_URL when the URL has none "
+        "(the Compose secret file database_password)",
+    )
+
+    @model_validator(mode="after")
+    def _merge_password(self) -> DatabaseSettings:
+        if self.database_password is None:
+            return self
+        password = self.database_password.get_secret_value().strip()
+        if not password:
+            raise ValueError("database_password is empty")
+        url = make_url(self.database_url.get_secret_value())
+        if url.password is None:
+            merged = url.set(password=password).render_as_string(hide_password=False)
+            self.database_url = SecretStr(merged)
+        return self
 
 
 class Settings(DatabaseSettings):
@@ -58,7 +84,10 @@ class Settings(DatabaseSettings):
     display_timezone: str = "Europe/Athens"
     stale_import_days: int = 7
 
-    _check_secrets = field_validator("session_secret", "gateway_token")(check_secret)
+    @field_validator("session_secret", "gateway_token")
+    @classmethod
+    def _check_secrets(cls, value: SecretStr) -> SecretStr:
+        return check_secret(SecretStr(value.get_secret_value().strip()))
 
 
 def get_database_settings() -> DatabaseSettings:

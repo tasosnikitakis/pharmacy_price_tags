@@ -54,12 +54,16 @@ jobs:
           echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
           echo "SESSION_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
           echo "GATEWAY_TOKEN=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+      - run: docker compose build
       - name: Compose refuses to start without secrets
         run: |
-          if env -u SESSION_SECRET docker compose config >/dev/null 2>&1; then
-            echo "compose accepted a missing SESSION_SECRET"; exit 1
-          fi
-      - run: docker compose up -d --build --wait --wait-timeout 180
+          for name in POSTGRES_PASSWORD SESSION_SECRET GATEWAY_TOKEN; do
+            if env -u "$name" docker compose up -d --no-build >/dev/null 2>&1; then
+              echo "compose accepted a missing $name"; exit 1
+            fi
+            docker compose down -v >/dev/null 2>&1 || true
+          done
+      - run: docker compose up -d --no-build --wait --wait-timeout 180
       - name: GET /health
         run: |
           for i in $(seq 1 30); do
