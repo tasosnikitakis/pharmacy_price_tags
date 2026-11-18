@@ -30,8 +30,9 @@ class SeenTag:
     model: str | None
     rssi: int | None
     battery_mv: int | None
-    battery_pct: int | None
+    battery_pct: int | None  # None unless the vendor reports a calibrated percentage
     seen_at: datetime  # timezone-aware UTC
+    firmware: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +82,8 @@ class TagDriver(Protocol):
         """Send a palette PNG. Return ok only when the tag confirmed the full image.
 
         Must never raise for tag-side problems; map them to a ``PushError`` instead.
-        Must return within ``PUSH_TIMEOUT_S``.
+        A ``png`` whose size or palette does not match ``tag_type`` is ``rejected``
+        without contacting the tag. Must return within ``PUSH_TIMEOUT_S``.
         """
         ...
 
