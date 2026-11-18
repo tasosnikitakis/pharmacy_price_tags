@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
@@ -73,6 +73,18 @@ def time_el(when: datetime | None) -> str:
 def datetime_el(when: datetime | None) -> str:
     """``18/11/2026 14:05`` in the display time zone."""
     return "" if when is None else local(when).strftime("%d/%m/%Y %H:%M")
+
+
+def age_el(delta: timedelta) -> str:
+    """How long ago, in whole minutes, hours or days: ``3 ημέρες``."""
+    minutes = max(0, int(delta.total_seconds() // 60))
+    if minutes < 60:
+        return t("age.minute") if minutes == 1 else t("age.minutes", n=minutes)
+    hours = minutes // 60
+    if hours < 24:
+        return t("age.hour") if hours == 1 else t("age.hours", n=hours)
+    days = hours // 24
+    return t("age.day") if days == 1 else t("age.days", n=days)
 
 
 def date_input(when: date | None) -> str:

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}{{ t("dashboard.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("dashboard.title") }}</h1>
+
+{% if import_stale %}
+<p class="flash flash-warning" role="alert" id="import-warning">
+  {% if data.last_import_at %}{{ t("dashboard.import.stale", days=stale_days, age=import_age | age_el) }}{% else %}{{ t("dashboard.import.none") }}{% endif %}
+</p>
+{% endif %}
+{% if gateway_warning %}
+<p class="flash flash-warning" role="alert" id="gateway-warning">
+  {% if gateways %}{{ t("dashboard.gateway.stale") }}{% else %}{{ t("dashboard.gateway.none") }}{% endif %}
+</p>
+{% endif %}
+
+<section aria-labelledby="counts-h">
+  <h2 id="counts-h" class="sr-only">{{ t("dashboard.counts.title") }}</h2>
+  <ul class="tiles">
+    <li><a class="tile status-up_to_date" href="/tags?status=up_to_date"><span class="tile-n" id="count-up_to_date">{{ counts.up_to_date }}</span> {{ t("dashboard.counts.up_to_date") }}</a></li>
+    <li><a class="tile status-pending" href="/tags?status=pending"><span class="tile-n" id="count-pending">{{ counts.pending }}</span> {{ t("dashboard.counts.pending") }}</a></li>
+    <li><a class="tile{% if counts.failed %} status-failed{% endif %}" href="#failed-h"><span class="tile-n" id="count-failed">{{ counts.failed }}</span> {{ t("dashboard.counts.failed") }}
+      <span class="sub">{{ t("dashboard.counts.dead") }} <span id="count-dead">{{ counts.dead }}</span></span></a></li>
+    <li><a class="tile{% if counts.no_label %} status-failed{% endif %}" href="/tags?status=no_label"><span class="tile-n" id="count-no_label">{{ counts.no_label }}</span> {{ t("dashboard.counts.no_label") }}</a></li>
+    <li><a class="tile{% if counts.unseen %} status-pending{% endif %}" href="#unseen-h"><span class="tile-n" id="count-unseen">{{ counts.unseen }}</span> {{ t("dashboard.counts.unseen") }}</a></li>
+    <li><a class="tile{% if counts.low_battery %} status-pending{% endif %}" href="#battery-h"><span class="tile-n" id="count-low_battery">{{ counts.low_battery }}</span> {{ t("dashboard.counts.low_battery") }}</a></li>
+  </ul>
+  <p class="sub" id="count-total">{{ t("dashboard.counts.total", total=counts.total, bound=counts.bound, unbound=counts.unbound) }}</p>
+</section>
+
+<div class="grid">
+<section class="card" aria-labelledby="import-h">
+  <h2 id="import-h">{{ t("dashboard.import.title") }}</h2>
+  {% if data.last_import_at %}
+  <p id="import-age">{{ t("dashboard.import.last", when=data.last_import_at | datetime_el, age=import_age | age_el) }}</p>
+  {% else %}
+  <p id="import-age">{{ t("dashboard.import.never") }}</p>
+  {% endif %}
+  <p class="sub">{{ t("dashboard.import.threshold", days=stale_days) }}</p>
+  <p><a href="/import">{{ t("dashboard.import.link") }}</a></p>
+</section>
+
+<section class="card" aria-labelledby="gateway-h">
+  <h2 id="gateway-h">{{ t("dashboard.gateway.title") }}</h2>
+  {% for gateway, stale in gateways %}
+  <p class="gateway">
+    <strong>{{ gateway.name }}</strong>:
+    {% if gateway.last_heartbeat_at %}{{ t("dashboard.gateway.last", when=gateway.last_heartbeat_at | datetime_el) }}{% else %}{{ t("dashboard.gateway.never") }}{% endif %}
+    <span class="status {{ 'status-failed' if stale else 'status-up_to_date' }}">{{ t("dashboard.gateway.offline") if stale else t("dashboard.gateway.online") }}</span>
+  </p>
+  {% else %}
+  <p>{{ t("dashboard.gateway.none") }}</p>
+  {% endfor %}
+</section>
+</div>
+
+{% macro tag_link(row) %}<a class="mono" href="/tags/{{ row.tag.id }}">{{ row.tag.short_code }}</a>{% if row.product %} · {{ row.product.name }}{% else %} · <span class="sub">{{ t("tags.unbound") }}</span>{% endif %}{% endmacro %}
+
+<section class="card" aria-labelledby="failed-h">
+  <h2 id="failed-h">{{ t("dashboard.failed.title", n=data.failed | length) }}</h2>
+  {% if data.failed %}
+  <ul class="plain" id="failed-list">
+    {% for row in data.failed[:limit] %}
+    <li>{{ tag_link(row) }} — <span class="status status-{{ row.status.value }}">{{ t("tags.status." + row.status.value) }}</span>{% if row.last_job and row.last_job.error_code %}: {{ t("push_error." + row.last_job.error_code) }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}<p>{{ t("dashboard.failed.none") }}</p>{% endif %}
+</section>
+
+<section class="card" aria-labelledby="failing-h">
+  <h2 id="failing-h">{{ t("dashboard.failing.title", n=data.failing_labels | length) }}</h2>
+  {% if data.failing_labels %}
+  <ul class="plain" id="failing-list">
+    {% for item in data.failing_labels[:limit] %}
+    <li>{{ tag_link(item.row) }} — {% if item.since %}{{ t("dashboard.failing.promo_boundary", when=item.since | datetime_el) }}{% else %}{{ t("dashboard.failing.no_label") }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}<p>{{ t("dashboard.failing.none") }}</p>{% endif %}
+</section>
+
+<div class="grid">
+<section class="card" aria-labelledby="unseen-h">
+  <h2 id="unseen-h">{{ t("dashboard.unseen.title", n=data.unseen | length) }}</h2>
+  {% if data.unseen %}
+  <ul class="plain" id="unseen-list">
+    {% for row in data.unseen[:limit] %}
+    <li>{{ tag_link(row) }} — {{ t("dashboard.unseen.last", when=row.tag.last_seen_at | datetime_el) if row.tag.last_seen_at else t("tags.never") }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}<p>{{ t("dashboard.unseen.none") }}</p>{% endif %}
+</section>
+
+<section class="card" aria-labelledby="battery-h">
+  <h2 id="battery-h">{{ t("dashboard.battery.title", n=data.low_battery | length) }}</h2>
+  {% if data.low_battery %}
+  <ul class="plain" id="battery-list">
+    {% for row in data.low_battery[:limit] %}
+    <li>{{ tag_link(row) }} — {% if row.tag.battery_pct is not none %}{{ t("tags.battery_pct", value=row.tag.battery_pct) }}{% else %}{{ t("tags.battery_mv", value=row.tag.battery_mv) }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}<p>{{ t("dashboard.battery.none") }}</p>{% endif %}
+</section>
+</div>
+{% endblock %}

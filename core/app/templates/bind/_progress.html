@@ -1,0 +1,16 @@
+{% set job = progress.job %}
+<div id="bind-progress" class="progress progress-{{ state }}" data-state="{{ state }}" role="status" aria-live="polite"
+     {% if polling %}hx-get="/bind/tags/{{ tag_id }}/progress" hx-trigger="every {{ poll_seconds }}s" hx-swap="outerHTML"{% endif %}>
+  <p class="progress-title"><span class="status status-{{ state }}">{{ t("bind.progress." + state) }}</span></p>
+  {% if state == "pending" %}
+  <p class="hint">{{ t("bind.progress.pending_hint") }}</p>
+  {% elif state == "up_to_date" %}
+  <p class="hint">{{ t("bind.progress.done_hint") }}</p>
+  {% elif state in ("failed", "dead") %}
+  {% if job and job.error_code %}<p id="push-error">{{ t("bind.progress.reason", reason=t("push_error." + job.error_code)) }}</p>{% endif %}
+  {% if state == "failed" and job and job.next_attempt_at %}<p class="hint">{{ t("bind.progress.retry_at", when=job.next_attempt_at | time_el) }}</p>{% endif %}
+  {% if state == "dead" %}<p class="hint">{{ t("bind.progress.dead_hint") }}</p>{% endif %}
+  {% elif state == "no_label" %}
+  <p class="hint">{{ t("bind.progress.no_label_hint") }}</p>
+  {% endif %}
+</div>

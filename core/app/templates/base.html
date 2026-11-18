@@ -7,6 +7,7 @@
   <title>{% block title %}{{ t("app.name") }}{% endblock %} · {{ t("app.name") }}</title>
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/vendor/htmx-2.0.11/htmx.min.js" defer></script>
+  <script src="/static/app.js" data-zxing="{{ ZXING_SRC }}" defer></script>
 </head>
 <body hx-boost="true" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <a class="skip" href="#main">{{ t("nav.skip") }}</a>
@@ -14,6 +15,9 @@
     <span class="brand">{{ t("app.name") }}</span>
     {% if user %}
     <nav aria-label="{{ t('nav.label') }}">
+      <a href="/"{% if request.url.path == '/' %} aria-current="page"{% endif %}>{{ t("nav.dashboard") }}</a>
+      <a href="/bind"{% if request.url.path.startswith('/bind') %} aria-current="page"{% endif %}>{{ t("nav.bind") }}</a>
+      <a href="/audit"{% if request.url.path.startswith('/audit') %} aria-current="page"{% endif %}>{{ t("nav.audit") }}</a>
       <a href="/products"{% if request.url.path.startswith('/products') %} aria-current="page"{% endif %}>{{ t("nav.products") }}</a>
       <a href="/import"{% if request.url.path.startswith('/import') %} aria-current="page"{% endif %}>{{ t("nav.import") }}</a>
       <a href="/tags"{% if request.url.path.startswith('/tags') %} aria-current="page"{% endif %}>{{ t("nav.tags") }}</a>

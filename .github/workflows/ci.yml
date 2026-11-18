@@ -37,6 +37,13 @@ jobs:
           version: "0.11.x"
       - run: uv python install 3.12
       - run: uv sync --all-extras --frozen
+      # Browser tests (tests/e2e/test_ui_*.py): Node Playwright with Chromium. With
+      # CI=true (set by GitHub Actions) they fail instead of skipping without it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install -g playwright@1.63.0
+      - run: npx playwright install --with-deps chromium
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ t("bind.bound_title", code=row.tag.short_code) }}{% endblock %}
+{% block content %}
+<div class="phone">
+<h1>{{ t("bind.bound_title", code=row.tag.short_code) }}</h1>
+{% if row.product %}
+<p class="product-line">{{ row.product.name }} · <span class="mono">{{ row.product.ean }}</span>{% if row.template %} · {{ t("template." + row.template) }}{% endif %}</p>
+{% endif %}
+{% include "bind/_progress.html" %}
+<p><a class="button-link primary wide" href="/bind" id="bind-next">{{ t("bind.next_tag") }}</a></p>
+{% if row.product %}<p><a class="button-link wide" href="/bind?ean={{ row.product.ean | urlencode }}">{{ t("bind.same_product") }}</a></p>{% endif %}
+<p><a href="/tags/{{ row.tag.id }}">{{ t("bind.tag_details") }}</a></p>
+</div>
+{% endblock %}

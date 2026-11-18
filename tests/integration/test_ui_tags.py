@@ -51,7 +51,10 @@ def test_status_rules() -> None:
     assert tag_status("a" * 64, "b" * 64, "claimed") is TagStatus.PENDING
     assert tag_status("a" * 64, None, "failed") is TagStatus.FAILED
     assert tag_status("a" * 64, None, "dead") is TagStatus.DEAD
-    assert tag_status(None, None, None) is TagStatus.PENDING
+    assert tag_status(None, None, None) is TagStatus.NO_LABEL
+    assert tag_status(None, None, "dead") is TagStatus.NO_LABEL
+    assert tag_status("a" * 64, "b" * 64, None) is TagStatus.PENDING
+    assert tag_status("a" * 64, "b" * 64, "acked") is TagStatus.PENDING
 
 
 def test_list_shows_product_seen_rssi_battery_and_status(ui: UI) -> None:

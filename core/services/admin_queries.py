@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import func, or_, select
@@ -27,6 +28,8 @@ from core.db.models import (
     Template,
     UpdateJob,
 )
+from core.services.catalogue import last_applied_import_at
+from core.services.tags import promo_boundary_tags
 
 SEARCH_LIMIT = 50
 
@@ -125,18 +128,28 @@ def tag_type_rows(session: Session, store_id: int = DEFAULT_STORE_ID) -> list[Ta
 
 
 class TagStatus(StrEnum):
-    """Displayed versus desired label, as the Tags page shows it."""
+    """Displayed versus desired label, as the Tags page, the Dashboard, the binding
+    flow and the audit page show it. Every tag has exactly one status."""
 
     UP_TO_DATE = "up_to_date"
     PENDING = "pending"
     FAILED = "failed"
     DEAD = "dead"
+    NO_LABEL = "no_label"
 
 
 def tag_status(desired: str | None, displayed: str | None, last_job_state: str | None) -> TagStatus:
-    """``up_to_date`` when the tag shows its desired label; otherwise the state of its
-    newest job: ``dead``, ``failed`` (waiting for a retry), else ``pending``."""
-    if desired is not None and desired == displayed:
+    """The tag's one status:
+
+    - ``no_label``: no label could be built yet (``desired_hash`` is NULL);
+    - ``up_to_date``: it shows its desired label (``displayed_hash = desired_hash``);
+    - otherwise the state of its newest job: ``dead``, ``failed`` (waiting for a
+      retry), else ``pending`` (queued or claimed; or, for the moment between a
+      change and the reconcile in the same transaction, no active job yet).
+    """
+    if desired is None:
+        return TagStatus.NO_LABEL
+    if desired == displayed:
         return TagStatus.UP_TO_DATE
     if last_job_state == "dead":
         return TagStatus.DEAD
@@ -198,6 +211,61 @@ def tag_row(session: Session, tag_id: int, store_id: int = DEFAULT_STORE_ID) -> 
     return rows[0] if rows else None
 
 
+def find_tag(session: Session, code: str, store_id: int = DEFAULT_STORE_ID) -> Tag | None:
+    """The tag whose ``short_code`` is ``code`` in any case (spaces ignored), or else
+    whose ``vendor_id`` is ``code`` ignoring case (a code scanned from the tag's own
+    sticker). ``None`` when neither matches."""
+    cleaned = "".join(code.split())
+    if not cleaned or len(cleaned) > 64:
+        return None
+    tag = session.scalars(
+        select(Tag).where(Tag.store_id == store_id, Tag.short_code == cleaned.upper())
+    ).one_or_none()
+    if tag is not None:
+        return tag
+    return session.scalars(
+        select(Tag)
+        .where(Tag.store_id == store_id, func.lower(Tag.vendor_id) == cleaned.lower())
+        .order_by(Tag.id)
+        .limit(1)
+    ).one_or_none()
+
+
+@dataclass(frozen=True, slots=True)
+class TagProgress:
+    """What the binding page polls: the tag's hashes and its newest job."""
+
+    desired_hash: str | None
+    displayed_hash: str | None
+    job: UpdateJob | None
+
+    @property
+    def status(self) -> TagStatus:
+        state = self.job.state if self.job is not None else None
+        return tag_status(self.desired_hash, self.displayed_hash, state)
+
+
+def tag_progress(
+    session: Session, tag_id: int, store_id: int = DEFAULT_STORE_ID
+) -> TagProgress | None:
+    """Two primary-key-ordered lookups, cheap enough to poll every few seconds."""
+    row = session.execute(
+        select(Tag.desired_hash, Tag.displayed_hash).where(
+            Tag.id == tag_id, Tag.store_id == store_id
+        )
+    ).first()
+    if row is None:
+        return None
+    job = session.scalars(
+        select(UpdateJob)
+        .where(UpdateJob.tag_id == tag_id)
+        .order_by(UpdateJob.id.desc())
+        .limit(1)
+        .execution_options(populate_existing=True)
+    ).first()
+    return TagProgress(row[0], row[1], job)
+
+
 def tag_jobs(session: Session, tag_id: int, limit: int = 10) -> list[UpdateJob]:
     return list(
         session.scalars(
@@ -237,3 +305,144 @@ def gateways(session: Session, store_id: int = DEFAULT_STORE_ID) -> list[Gateway
             select(GatewayRow).where(GatewayRow.store_id == store_id).order_by(GatewayRow.name)
         )
     )
+
+
+# --- Dashboard ------------------------------------------------------------------------
+
+
+class FailingReason(StrEnum):
+    """Why a tag's label keeps failing to build (decision 0014), from what the database
+    records; no column says so directly."""
+
+    #: ``desired_hash`` is NULL: no label could ever be built for this tag.
+    NO_LABEL = "no_label"
+    #: Its product's promo started or ended, but the tag's label still predates that
+    #: moment: every gateway claim retries it (``promo_boundary_tags``), and so far it
+    #: could not be built, or the promo is refused.
+    PROMO_BOUNDARY = "promo_boundary"
+
+
+@dataclass(frozen=True, slots=True)
+class FailingLabel:
+    row: TagRow
+    reason: FailingReason
+    #: The promo start or end the label is behind; ``None`` for ``no_label``.
+    since: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardCounts:
+    """Tag counts. ``up_to_date + pending + failed + no_label == total`` (each tag has
+    one ``TagStatus``; ``failed`` includes ``dead``); ``bound + unbound == total``;
+    ``unseen`` and ``low_battery`` cut across all of them."""
+
+    total: int
+    bound: int
+    unbound: int
+    up_to_date: int
+    pending: int
+    failed: int
+    dead: int
+    no_label: int
+    unseen: int
+    low_battery: int
+
+
+@dataclass(frozen=True, slots=True)
+class Dashboard:
+    counts: DashboardCounts
+    last_import_at: datetime | None
+    gateways: list[GatewayRow]
+    failed: list[TagRow]
+    failing_labels: list[FailingLabel]
+    unseen: list[TagRow]
+    low_battery: list[TagRow]
+
+
+def is_unseen(tag: Tag, now: datetime, unseen_after: timedelta) -> bool:
+    """Not seen by the gateway for longer than ``unseen_after``, or never."""
+    return tag.last_seen_at is None or tag.last_seen_at < now - unseen_after
+
+
+def is_low_battery(tag: Tag, low_pct: int, low_mv: int) -> bool:
+    """Below ``low_pct`` percent when the tag reports a percentage, else below
+    ``low_mv`` millivolts when it reports a voltage. Unknown is not low."""
+    if tag.battery_pct is not None:
+        return tag.battery_pct < low_pct
+    return tag.battery_mv is not None and tag.battery_mv < low_mv
+
+
+def dashboard(
+    session: Session,
+    now: datetime,
+    *,
+    unseen_after: timedelta,
+    low_battery_pct: int,
+    low_battery_mv: int,
+    failing_grace: timedelta,
+    store_id: int = DEFAULT_STORE_ID,
+) -> Dashboard:
+    """Everything the Dashboard shows, read without locks.
+
+    ``failing_grace``: a tag behind a promo start or end is listed only once the
+    boundary is older than this, so the minute until the next gateway claim refreshes
+    it is not reported as a failure.
+    """
+    rows = tag_rows(session, store_id)
+    statuses = [row.status for row in rows]
+    unseen = [row for row in rows if is_unseen(row.tag, now, unseen_after)]
+    low = [row for row in rows if is_low_battery(row.tag, low_battery_pct, low_battery_mv)]
+    counts = DashboardCounts(
+        total=len(rows),
+        bound=sum(1 for row in rows if row.product is not None),
+        unbound=sum(1 for row in rows if row.product is None),
+        up_to_date=statuses.count(TagStatus.UP_TO_DATE),
+        pending=statuses.count(TagStatus.PENDING),
+        failed=statuses.count(TagStatus.FAILED) + statuses.count(TagStatus.DEAD),
+        dead=statuses.count(TagStatus.DEAD),
+        no_label=statuses.count(TagStatus.NO_LABEL),
+        unseen=len(unseen),
+        low_battery=len(low),
+    )
+    return Dashboard(
+        counts=counts,
+        last_import_at=last_applied_import_at(session, store_id),
+        gateways=gateways(session, store_id),
+        failed=[row for row in rows if row.status in (TagStatus.FAILED, TagStatus.DEAD)],
+        failing_labels=_failing_labels(session, rows, now, failing_grace, store_id),
+        unseen=unseen,
+        low_battery=low,
+    )
+
+
+def _failing_labels(
+    session: Session,
+    rows: Sequence[TagRow],
+    now: datetime,
+    grace: timedelta,
+    store_id: int,
+) -> list[FailingLabel]:
+    by_id = {row.tag.id: row for row in rows}
+    failing = [
+        FailingLabel(row, FailingReason.NO_LABEL, None)
+        for row in rows
+        if row.tag.desired_hash is None
+    ]
+    behind = promo_boundary_tags(session, now, store_id)
+    if behind:
+        prices = session.execute(
+            select(Binding.tag_id, Price.promo_from, Price.promo_to)
+            .join(Price, Price.product_id == Binding.product_id)
+            .where(Binding.tag_id.in_(behind))
+        ).tuples()
+        for tag_id, start, end in prices:
+            row = by_id.get(tag_id)
+            changed = row.tag.desired_hash_changed_at if row is not None else None
+            if row is None or changed is None or start is None or end is None:
+                continue
+            # The flip the label is behind: the start if the label predates it, else the end.
+            since = start if start > changed else end
+            if since <= now - grace:
+                failing.append(FailingLabel(row, FailingReason.PROMO_BOUNDARY, since))
+    failing.sort(key=lambda f: f.row.tag.short_code)
+    return failing

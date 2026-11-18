@@ -15,11 +15,12 @@ import pytest
 from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from core.db.models import GatewayRow, Price, Tag, TagTypeRow, UpdateJob
+from core.db.models import Binding, GatewayRow, Price, Tag, TagTypeRow, UpdateJob
 from core.services import catalogue as svc
 from core.services.queue import claim_jobs, report_result
 from core.services.tag_types import add_tag_type
 from core.services.tags import (
+    BindingChanged,
     bind_tag,
     real_label_pipeline,
     record_seen_tags,
@@ -260,6 +261,37 @@ def test_rebind_waits_for_an_open_write_on_the_product_it_leaves(
     thread.join(10)
     assert done.is_set() and errors == []
     assert _label_is_current(factory, tag_id, now)
+
+
+def test_two_binds_of_an_unbound_tag_the_second_is_refused_not_overwritten(
+    factory: sessionmaker[Session], scratch_engine: Engine
+) -> None:
+    """Both saw the tag unbound; the second waits for the tag lock, then finds the
+    first binding and raises instead of silently rebinding (decision 0017)."""
+    _, _, product_id = _setup(factory)
+    tag_id = _tag_id(factory, "LOCK-2")
+    with factory() as s:
+        other = s.scalars(
+            select(Price.product_id)
+            .where(Price.product_id != product_id)
+            .order_by(Price.product_id)
+        ).first()
+    assert other is not None
+    now = T0 + timedelta(seconds=30)
+    with factory() as first:
+        bind_tag(first, tag_id, product_id, actor="a", now=now, expect_bound_to=None)
+        thread, done, errors = _in_thread(
+            factory,
+            lambda s: bind_tag(s, tag_id, other, actor="b", now=now, expect_bound_to=None),
+        )
+        _wait_until_blocked(scratch_engine, done)
+        first.commit()
+    thread.join(10)
+    assert done.is_set() and len(errors) == 1 and isinstance(errors[0], BindingChanged)
+    with factory() as s:
+        assert s.scalars(select(Binding.product_id).where(Binding.tag_id == tag_id)).one() == (
+            product_id
+        )
 
 
 def test_concurrent_identical_tag_type_adds_both_succeed(

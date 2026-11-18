@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% from "_scan.html" import scan_button %}
+{% block title %}{{ t("bind.title") }}{% endblock %}
+{% block content %}
+<div class="phone">
+<h1>{{ t("bind.title") }}</h1>
+<ol class="steps" aria-label="{{ t('bind.steps.label') }}">
+  <li{% if step in ("ean", "create") %} aria-current="step"{% endif %}>{{ t("bind.steps.product") }}</li>
+  <li{% if step in ("code", "rebind") %} aria-current="step"{% endif %}>{{ t("bind.steps.tag") }}</li>
+  <li{% if step == "confirm" %} aria-current="step"{% endif %}>{{ t("bind.steps.confirm") }}</li>
+</ol>
+
+{% if error %}<p class="flash flash-error" role="alert" id="bind-error">{{ error }}</p>{% endif %}
+
+{% if step == "ean" %}
+<form method="get" action="/bind" class="big-form" id="ean-form">
+  <label for="ean">{{ t("bind.ean.label") }}</label>
+  <input id="ean" name="ean" value="{{ ean }}" inputmode="numeric" autocomplete="off" enterkeyhint="go" maxlength="40" required autofocus>
+  <p class="hint">{{ t("bind.ean.hint") }}</p>
+  <button type="submit" class="wide">{{ t("bind.next") }}</button>
+</form>
+{{ scan_button("ean", "ean_13,ean_8") }}
+
+{% elif step == "create" %}
+<section class="card" aria-labelledby="create-h">
+  <h2 id="create-h">{{ t("bind.create.title") }}</h2>
+  <p>{{ t("bind.create.unknown", ean=ean) }}</p>
+  {% if user.role == "admin" %}
+  <form method="post" action="/bind/product" class="big-form" id="create-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="ean" value="{{ ean }}">
+    <label for="name">{{ t("bind.create.name") }}</label>
+    <input id="name" name="name" value="{{ create.name or '' }}" maxlength="300" required autofocus>
+    <label for="regular_price">{{ t("bind.create.price") }}</label>
+    <input id="regular_price" name="regular_price" value="{{ create.regular_price or '' }}" inputmode="decimal" placeholder="{{ t('bind.create.price_placeholder') }}" required>
+    <div class="row">
+      <div>
+        <label for="pack_qty">{{ t("bind.create.pack_qty") }}</label>
+        <input id="pack_qty" name="pack_qty" value="{{ create.pack_qty or '' }}" inputmode="decimal">
+      </div>
+      <div>
+        <label for="pack_unit">{{ t("bind.create.pack_unit") }}</label>
+        <select id="pack_unit" name="pack_unit">
+          <option value="">{{ t("bind.create.no_unit") }}</option>
+          {% for unit in units %}<option value="{{ unit }}"{% if create.pack_unit == unit %} selected{% endif %}>{{ t("unit." + unit) }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="unit_price_required" value="true"{% if create.unit_price_required %} checked{% endif %}> {{ t("bind.create.unit_price_required") }}</label>
+    <label class="check"><input type="checkbox" name="is_rx" value="true"{% if create.is_rx %} checked{% endif %}> {{ t("bind.create.is_rx") }}</label>
+    <button type="submit" class="wide">{{ t("bind.create.submit") }}</button>
+  </form>
+  {% else %}
+  <p class="flash flash-warning" role="alert" id="admin-needed">{{ t("bind.create.admin_needed") }}</p>
+  {% endif %}
+  <p><a class="button-link" href="/bind">{{ t("bind.other_ean") }}</a></p>
+</section>
+
+{% else %}
+<section class="card product-summary" aria-labelledby="product-h">
+  <h2 id="product-h">{{ product.name }}</h2>
+  <p><span class="mono">{{ product.ean }}</span>{% if price %} · <strong>{{ price.regular_cents | money }}</strong>{% endif %}{% if product.is_rx %} · <span class="badge">{{ t("bind.rx") }}</span>{% endif %}</p>
+  <p><a href="/bind">{{ t("bind.other_ean") }}</a></p>
+</section>
+
+{% if step == "code" %}
+<form method="get" action="/bind" class="big-form" id="code-form">
+  <input type="hidden" name="ean" value="{{ ean }}">
+  <label for="code">{{ t("bind.code.label") }}</label>
+  <input id="code" name="code" value="{{ code }}" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go" maxlength="64" required autofocus>
+  <p class="hint">{{ t("bind.code.hint") }}</p>
+  <button type="submit" class="wide">{{ t("bind.next") }}</button>
+</form>
+{{ scan_button("code", "qr_code,code_128,data_matrix") }}
+
+{% elif step == "rebind" %}
+<section class="card warning-card" aria-labelledby="rebind-h" id="rebind">
+  <h2 id="rebind-h">{{ t("bind.rebind.title", code=row.tag.short_code) }}</h2>
+  {% if row.product.id == product.id %}
+  <p>{{ t("bind.rebind.same", code=row.tag.short_code, name=row.product.name) }}</p>
+  {% else %}
+  <p>{{ t("bind.rebind.other", code=row.tag.short_code, name=row.product.name) }}</p>
+  {% endif %}
+  <p><a class="button-link primary" id="rebind-yes" href="/bind?ean={{ ean | urlencode }}&amp;code={{ code | urlencode }}&amp;rebind={{ row.product.id }}">{{ t("bind.rebind.yes", name=product.name) }}</a></p>
+  <p><a class="button-link" href="/bind?ean={{ ean | urlencode }}">{{ t("bind.rebind.no") }}</a></p>
+</section>
+
+{% elif step == "confirm" %}
+<form method="post" action="/bind" class="big-form" id="confirm-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <input type="hidden" name="product_id" value="{{ product.id }}">
+  <input type="hidden" name="tag_id" value="{{ row.tag.id }}">
+  <input type="hidden" name="rebind_from" value="{{ rebind_from }}">
+  <p>{{ t("bind.confirm.tag", code=row.tag.short_code, type=row.tag_type.key) }}</p>
+  <fieldset class="choices" hx-get="/bind/preview" hx-trigger="change" hx-target="#bind-preview" hx-swap="outerHTML"
+            hx-include="#confirm-form [name=product_id], #confirm-form [name=tag_id], #confirm-form [name=template]:checked">
+    <legend>{{ t("bind.template.legend") }}</legend>
+    {% for option in options %}
+    <label class="choice"><input type="radio" name="template" value="{{ option.value }}"{% if option == template %} checked{% endif %}> {{ t("template." + option.value) }}</label>
+    {% endfor %}
+  </fieldset>
+  {% include "bind/_preview.html" %}
+  <button type="submit" class="wide" id="confirm">{{ t("bind.confirm.submit") }}</button>
+</form>
+{% endif %}
+{% endif %}
+</div>
+{% endblock %}
