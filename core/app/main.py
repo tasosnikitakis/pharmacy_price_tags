@@ -20,6 +20,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from core.app.routers import gateway as gateway_router
+from core.app.throttle import LoginThrottle
 from core.config import get_settings
 from core.db.session import get_session
 from shared.gateway_api import API_PREFIX
@@ -37,6 +38,8 @@ def create_app() -> FastAPI:
     # Fail fast: a missing or weak secret stops the process before it serves anything.
     settings = get_settings()
     app = FastAPI(title="Pharmacy ESL core", version=VERSION)
+    # In memory, one per app: the core runs as one process (decision 0019).
+    app.state.login_throttle = LoginThrottle.from_settings(settings)
     app.include_router(gateway_router.router)
 
     @app.get("/health", response_model=Health)

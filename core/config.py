@@ -194,6 +194,34 @@ class Settings(DatabaseSettings):
         "price changes in an import warn",
     )
 
+    # Login throttling (decision 0019). The IP allowance is the larger one: the shop's
+    # phones probably share one address behind the router's NAT.
+    login_throttle_account_free: int = Field(
+        default=5, gt=0, description="Failed logins per email before delays start"
+    )
+    login_throttle_ip_free: int = Field(
+        default=20, gt=0, description="Failed logins per client IP before delays start"
+    )
+    login_throttle_base_seconds: int = Field(
+        default=2,
+        gt=0,
+        description="Delay unit: the n-th failure over the allowance waits base * 2**n",
+    )
+    login_throttle_max_seconds: int = Field(
+        default=900, gt=0, description="Longest delay; there is no permanent lockout"
+    )
+    login_throttle_window_seconds: int = Field(
+        default=3600, gt=0, description="Failures are forgotten after this long without one"
+    )
+
+    @model_validator(mode="after")
+    def _check_login_throttle(self) -> Settings:
+        if self.login_throttle_max_seconds < self.login_throttle_base_seconds:
+            raise ValueError("login_throttle_max_seconds must be at least the base seconds")
+        if self.login_throttle_ip_free < self.login_throttle_account_free:
+            raise ValueError("login_throttle_ip_free must be at least login_throttle_account_free")
+        return self
+
     @field_validator("session_secret", "gateway_token")
     @classmethod
     def _check_secrets(cls, value: SecretStr) -> SecretStr:

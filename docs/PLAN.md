@@ -406,7 +406,7 @@ Milestones M0–M3 and M5 need no hardware and can start today; only M4 and M6 w
 | M3 | Tags, bindings, queue | Tag and binding models, reconciler, update-job state machine, gateway API, gateway agent with fake driver | End to end with the fake driver: a price change produces a new PNG for exactly the bound tags; injected failures retry and end in `dead` after 6 attempts | No |
 | M4 | Gicisky driver | `docs/gicisky-protocol.md`, BLE driver, `push_png.py` tool, discovery reporting | A price edit in the UI appears on a real tag within 2 minutes; 50 consecutive pushes succeed at 3 m | Yes |
 | M5 | Admin UI and binding | All pages in section 9, login and roles, phone binding and audit flows | A staff user can bind a product to a tag from a phone unaided; dashboard numbers match the database | No (fake driver) |
-| M6 | Store install | Runbook, systemd unit for the gateway, HTTPS on the private network, nightly Postgres dump to off-site storage, restore tested | A fresh box is installed from the runbook alone; a restore from backup is demonstrated; staleness and failed-job warnings show up | Yes |
+| M6 | Store install | Runbook, systemd unit for the gateway, HTTPS on the private network, nightly Postgres dump to off-site storage, restore tested; no access from customer or guest Wi-Fi, only the staff network or Tailscale (decision 0019) | A fresh box is installed from the runbook alone; a restore from backup is demonstrated; staleness and failed-job warnings show up | Yes |
 | M7 | Later, not part of this build | Move core to Railway, real multi-store, second driver (Opticon EBS-50 or Zkong), ERP adapter | Decided separately after the pilot | n/a |
 
 Suggested order while waiting for hardware: M0, M1, M2, M3, M5, then M4 when the tags arrive, then M6.
