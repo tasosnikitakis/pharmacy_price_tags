@@ -36,8 +36,6 @@ from core.domain.types import (
 )
 from core.render.label import TemplateKey
 
-pytestmark = pytest.mark.xfail(raises=NotImplementedError, reason="workstream B")
-
 T0 = datetime(2026, 12, 1, 8, 0, tzinfo=UTC)
 
 
@@ -188,9 +186,9 @@ def test_price_drop_earlier_the_same_day_counts_for_prior_price() -> None:
     """Regular 10,00 for 60 days, dropped to 9,00 three hours ago; a promo saved now
     takes effect now, so the 30-day window ends now and includes the drop."""
     now = T0
-    drop = PricePoint(next(_seq), 900, PriceKind.REGULAR, now - timedelta(hours=3),
-                      PriceSource.MANUAL)  # fmt: skip
-    history = [_point(1000, 60), drop]
+    history = [_point(1000, 60)]  # written first, so it has the lower seq
+    history.append(PricePoint(next(_seq), 900, PriceKind.REGULAR, now - timedelta(hours=3),
+                              PriceSource.MANUAL))  # fmt: skip
     assert lowest_prior_price(history, now) == 900
     week = now + timedelta(days=7)
     change = apply_price_change(
