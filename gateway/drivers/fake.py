@@ -74,7 +74,10 @@ class FakeConfigError(ValueError):
 
 def load_fake_config(path: Path) -> dict[str, Any]:
     """Read a JSON or TOML fake-tag configuration file."""
-    data = path.read_bytes()
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise FakeConfigError(f"{path.name}: {exc.strerror or exc}") from None
     try:
         if path.suffix.lower() == ".toml":
             loaded: Any = tomllib.loads(data.decode("utf-8"))
@@ -128,11 +131,14 @@ class FakeDriver:
         self.fail_rate = float(fail_rate if fail_rate is not None else config.get("fail_rate", 0))
         if not 0.0 <= self.fail_rate <= 1.0:
             raise FakeConfigError("fail_rate must be between 0 and 1")
-        self.fail_with = (
-            fail_with
-            if fail_with is not None
-            else PushError(config.get("fail_with", PushError.TIMEOUT.value))
-        )
+        if fail_with is None:
+            name = config.get("fail_with", PushError.TIMEOUT.value)
+            try:
+                fail_with = PushError(name)
+            except ValueError:
+                choices = ", ".join(e.value for e in PushError)
+                raise FakeConfigError(f"fail_with must be one of {choices}") from None
+        self.fail_with = fail_with
         self.delay_s = float(delay_s if delay_s is not None else config.get("delay_s", 0))
         self._rng = random.Random(seed if seed is not None else config.get("seed"))
         #: Every push attempt that reached a tag, in order: (vendor_id, ok).

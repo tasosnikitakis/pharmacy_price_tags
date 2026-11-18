@@ -15,7 +15,7 @@ from core.db.models import EventLog, GatewayRow, Tag, UpdateJob
 from core.domain.reconciler import BACKOFF, CLAIM_TIMEOUT
 from core.services.gateway_auth import hash_token, verify_token
 from core.services.queue import retry_dead_job
-from core.services.tags import refresh_desired_hashes
+from core.services.tags import SHORT_CODE_ALPHABET, refresh_desired_hashes
 from shared.gateway_api import API_PREFIX
 from tests.e2e.support import (
     T0,
@@ -164,6 +164,22 @@ def test_startup_creates_or_updates_gateway_row(
     assert len(rows) >= 1 and verify_token(token(), rows[0].token_hash)
 
 
+def test_gateway_row_is_provisioned_lazily_when_startup_could_not(
+    client: TestClient, db: Session
+) -> None:
+    """The app here never ran its lifespan (as after a failed startup provisioning),
+    and the stored hash is for another token: the first request provisions it."""
+    from tests.e2e.support import token
+
+    for row in db.scalars(select(GatewayRow)):
+        row.token_hash = hash_token("some other token " * 3)
+    db.flush()
+    r = client.post(f"{P}/heartbeat", json={"version": "1", "driver": "fake"})
+    assert r.status_code == 200
+    rows = list(db.scalars(select(GatewayRow).order_by(GatewayRow.id)))
+    assert verify_token(token(), rows[0].token_hash)
+
+
 class _NoClose:
     """Wraps the test session as a context manager that does not close it."""
 
@@ -217,6 +233,12 @@ def test_tags_seen_creates_updates_and_ignores(
 def test_new_tags_get_unique_short_codes(client: TestClient, db: Session, world: World) -> None:
     tags = _discover(client, db, world, *[f"F-{i}" for i in range(30)])
     assert len({t.short_code for t in tags}) == 30
+    assert all(set(t.short_code) <= set(SHORT_CODE_ALPHABET) for t in tags)
+
+
+def test_short_code_alphabet_has_no_look_alikes() -> None:
+    assert not set(SHORT_CODE_ALPHABET) & set("0OQ1IL2Z5SG8B")  # 6 stays; G is out
+    assert len(set(SHORT_CODE_ALPHABET)) == len(SHORT_CODE_ALPHABET)
 
 
 # Claim, render, result
@@ -413,10 +435,9 @@ def test_heartbeat_updates_gateway(
     assert (row.last_heartbeat_at, row.version, row.driver) == (T0, "0.1.0", "fake")
 
 
-# The real label pipeline, once workstream B has landed pricing and the renderer.
+# The real label pipeline: workstream B's pricing rules and renderer.
 
 
-@pytest.mark.xfail(raises=NotImplementedError, strict=True, reason="needs workstream B")
 def test_real_pipeline_renders_unassigned_and_bound_labels(db: Session, world: World) -> None:
     from core.services.tags import real_label_pipeline, record_seen_tags
     from shared.gateway_api import SeenTagReport

@@ -7,15 +7,17 @@ The core never calls the gateway; the gateway dials in here.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Path, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
@@ -46,13 +48,30 @@ from shared.gateway_api import (
 log = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """On startup, make the configured ``GATEWAY_TOKEN`` the v1 gateway's token."""
-    token = get_settings().gateway_token.get_secret_value()
-    with get_sessionmaker()() as session:
-        ensure_gateway(session, token)
+def _provision(session: Session) -> bool:
+    """Make the configured ``GATEWAY_TOKEN`` the v1 gateway's token, in its own
+    transaction. Returns ``False`` (logged, without the token) if the database fails."""
+    try:
+        ensure_gateway(session, get_settings().gateway_token.get_secret_value())
         session.commit()
+    except SQLAlchemyError as exc:
+        session.rollback()
+        log.warning("gateway row not provisioned (%s); retrying on first use", type(exc).__name__)
+        return False
+    return True
+
+
+def _provision_at_startup() -> bool:
+    with get_sessionmaker()() as session:
+        return _provision(session)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """On startup, provision the gateway row. A database that is down must not stop
+    the core from starting (``/health`` then reports it); the row is provisioned
+    lazily on the first gateway request instead."""
+    app.state.gateway_provisioned = await asyncio.to_thread(_provision_at_startup)
     yield
 
 
@@ -76,10 +95,14 @@ NowDep = Annotated[datetime, Depends(get_now)]
 
 
 def require_gateway(
+    request: Request,
     session: SessionDep,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> int:
     """The calling gateway's id; 401 without a valid bearer token."""
+    state = request.app.state
+    if not getattr(state, "gateway_provisioned", False):
+        state.gateway_provisioned = _provision(session)
     gateway_id = None
     if credentials is not None and credentials.scheme.lower() == "bearer":
         gateway_id = authenticate(session, credentials.credentials)

@@ -1,7 +1,8 @@
 """M3 end to end: the core app and the real gateway agent with the fake driver.
 
-The core runs in process (``httpx.ASGITransport``) on the rolled-back test session,
-with the fake renderer from ``support`` standing in for workstream B. Time is
+The core runs in process (``httpx.ASGITransport``) on the rolled-back test session.
+Every test runs twice: with the real label pipeline (``core.domain.pricing`` and
+``core.render``, the M3 evidence) and with the fake renderer from ``support``. Time is
 controlled through ``get_now``, so backoff takes no real time.
 """
 
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from core.db.models import Tag, UpdateJob
 from core.domain.reconciler import BACKOFF, MAX_ATTEMPTS
-from core.services.tags import refresh_desired_hashes
+from core.services.tags import LabelPipeline, real_label_pipeline, refresh_desired_hashes
 from gateway.agent import Agent, AgentTimings, CoreClient, RenderCache
 from gateway.drivers.base import PushError
 from gateway.drivers.fake import FakeDriver, FakeTag
@@ -33,7 +34,7 @@ class Rig:
     db: Session
     world: World
     clock: Clock
-    pipeline: FakePipeline
+    pipeline: LabelPipeline
     driver: FakeDriver
     agent: Agent
 
@@ -54,11 +55,18 @@ class Rig:
         return path.read_bytes() if path.exists() else None
 
 
+PIPELINES: dict[str, LabelPipeline] = {"real": real_label_pipeline, "fake": FakePipeline()}
+
+
 async def _rig(
-    db: Session, tmp_path: Path, vendor_ids: list[str], **driver_kw: object
+    db: Session,
+    tmp_path: Path,
+    pipeline: LabelPipeline,
+    vendor_ids: list[str],
+    **driver_kw: object,
 ) -> AsyncIterator[Rig]:
     world = seed(db)
-    clock, pipeline = Clock(), FakePipeline()
+    clock = Clock()
     app = build_app(db, clock, pipeline)
     driver = FakeDriver(
         [FakeTag(v, world.model, battery_mv=3000) for v in vendor_ids],
@@ -78,15 +86,19 @@ async def _rig(
         yield Rig(db, world, clock, pipeline, driver, agent)
 
 
-@pytest.fixture
-async def rig(db: Session, tmp_path: Path) -> AsyncIterator[Rig]:
-    async for r in _rig(db, tmp_path, ["T1", "T2", "T3", "T4"]):
+@pytest.fixture(params=list(PIPELINES))
+async def rig(db: Session, tmp_path: Path, request: pytest.FixtureRequest) -> AsyncIterator[Rig]:
+    async for r in _rig(db, tmp_path, PIPELINES[request.param], ["T1", "T2", "T3", "T4"]):
         yield r
 
 
-@pytest.fixture
-async def failing_rig(db: Session, tmp_path: Path) -> AsyncIterator[Rig]:
-    async for r in _rig(db, tmp_path, ["T1"], fail_rate=1.0, fail_with=PushError.TIMEOUT):
+@pytest.fixture(params=list(PIPELINES))
+async def failing_rig(
+    db: Session, tmp_path: Path, request: pytest.FixtureRequest
+) -> AsyncIterator[Rig]:
+    async for r in _rig(
+        db, tmp_path, PIPELINES[request.param], ["T1"], fail_rate=1.0, fail_with=PushError.TIMEOUT
+    ):
         yield r
 
 

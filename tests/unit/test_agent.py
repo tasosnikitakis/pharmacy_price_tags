@@ -31,9 +31,13 @@ FAST = AgentTimings(poll_interval_s=0.01, error_backoff_s=0.01, report_retry_del
 class MockCore:
     """Just enough of the core's gateway API to drive the agent."""
 
-    def __init__(self, jobs: list[dict[str, Any]], result_status: int = 200) -> None:
+    def __init__(
+        self, jobs: list[dict[str, Any]], result_status: int = 200, seen_status: int = 200
+    ) -> None:
         self.jobs = jobs
         self.result_status = result_status
+        self.seen_status = seen_status
+        self.malformed_claims = 0  # answer this many claims with a malformed body
         self.requests: list[tuple[str, str]] = []
         self.results: list[tuple[int, dict[str, Any]]] = []
         self.seen: list[dict[str, Any]] = []
@@ -46,6 +50,9 @@ class MockCore:
         self.requests.append((request.method, path))
         self.auth.add(request.headers.get("authorization"))
         if path == "/jobs/claim":
+            if self.malformed_claims:
+                self.malformed_claims -= 1
+                return httpx.Response(200, json={"jobs": [{"job_id": "not a job"}]})
             jobs, self.jobs = self.jobs, []
             return httpx.Response(200, json={"jobs": jobs})
         if path.startswith("/renders/"):
@@ -58,6 +65,8 @@ class MockCore:
             state = "acked" if body["outcome"] == "acked" else "failed"
             return httpx.Response(200, json={"job_id": int(path.split("/")[2]), "state": state})
         if path == "/tags/seen":
+            if self.seen_status != 200:
+                return httpx.Response(self.seen_status, json={"detail": "x"})
             body = json.loads(request.content)
             self.seen.extend(body["tags"])
             return httpx.Response(
@@ -285,3 +294,111 @@ def test_gateway_does_not_load_core_transitively() -> None:
     ).stdout.split()  # fmt: skip
     bad = [m for m in loaded if m == "core" or m.startswith(("core.", "sqlalchemy", "fastapi"))]
     assert bad == []
+
+
+# The loop keeps processing jobs whatever else fails (review notes N1 and N3).
+
+
+async def _run_until_results(agent: Agent, core: MockCore, http: httpx.AsyncClient) -> None:
+    stop = asyncio.Event()
+    async with http:
+        task = asyncio.create_task(agent.run(stop))
+        for _ in range(300):
+            if core.results:
+                break
+            await asyncio.sleep(0.01)
+        stop.set()
+        await asyncio.wait_for(task, 2)
+
+
+async def test_failing_tags_seen_never_stops_job_processing(tmp_path: Path) -> None:
+    core = MockCore([_job()], seen_status=500)
+    driver = _fake(tmp_path)
+    agent, http = _agent(core, driver, tmp_path)
+    await _run_until_results(agent, core, http)
+    assert core.results and core.results[0][1]["outcome"] == "acked"
+    assert driver.pushes == [("T1", True)]
+    # Discovery was tried, failed, and its timer moved on: tried once, not every pass.
+    assert len([r for r in core.requests if r[1] == "/tags/seen"]) == 1
+
+
+async def test_failing_heartbeat_never_stops_job_processing(tmp_path: Path) -> None:
+    core = MockCore([_job()])
+    original = core.handler
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/heartbeat"):
+            raise httpx.ConnectError("down", request=request)
+        return original(request)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://c")
+    agent = Agent(CoreClient(http), _fake(tmp_path), RenderCache(tmp_path / "c"), timings=FAST)
+    await _run_until_results(agent, core, http)
+    assert core.results
+
+
+class _DiscoverFails(_HangingDriver):
+    async def discover(self, timeout_s: float) -> list[SeenTag]:
+        raise RuntimeError("adapter gone")
+
+    async def push_image(self, vendor_id: str, tag_type: TagType, png: bytes) -> PushResult:
+        return PushResult(True, None, 0.0)
+
+
+async def test_driver_discover_exception_is_survived(tmp_path: Path) -> None:
+    core = MockCore([_job()])
+    agent, http = _agent(core, _DiscoverFails(), tmp_path)
+    await _run_until_results(agent, core, http)
+    assert core.results[0][1]["outcome"] == "acked"
+
+
+async def test_malformed_claim_response_is_survived(tmp_path: Path) -> None:
+    core = MockCore([_job()])
+    core.malformed_claims = 2
+    agent, http = _agent(core, _fake(tmp_path), tmp_path)
+    await _run_until_results(agent, core, http)
+    assert core.results[0][1]["outcome"] == "acked"
+    assert sum(1 for r in core.requests if r[1] == "/jobs/claim") >= 3
+
+
+class _BrokenCache(RenderCache):
+    def get(self, render_hash: str) -> bytes | None:
+        raise PermissionError("cache not readable")
+
+    def put(self, render_hash: str, png: bytes) -> None:
+        raise OSError("disk full")
+
+
+async def test_cache_errors_do_not_stop_the_push(tmp_path: Path) -> None:
+    core = MockCore([_job()])
+    http = httpx.AsyncClient(transport=httpx.MockTransport(core.handler), base_url="http://c")
+    agent = Agent(CoreClient(http), _fake(tmp_path), _BrokenCache(tmp_path), timings=FAST)
+    await _run_until_results(agent, core, http)
+    assert core.results[0][1]["outcome"] == "acked"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [b'{"fail_with": "explode"}', b"{not json", None],
+    ids=["bad-fail_with", "bad-json", "missing-file"],
+)
+def test_main_exits_2_on_bad_fake_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config: bytes | None,
+) -> None:
+    from gateway.__main__ import main
+
+    path = tmp_path / "tags.json"
+    if config is not None:
+        path.write_bytes(config)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CORE_URL", "http://core.test")
+    monkeypatch.setenv("GATEWAY_TOKEN", "t" * 40)
+    monkeypatch.setenv("GATEWAY_DRIVER", "fake")
+    monkeypatch.setenv("GATEWAY_FAKE_TAGS", str(path))
+    assert main(["--cache-dir", str(tmp_path / "c")]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("gateway: ") and err.count("\n") == 1
+    assert "t" * 40 not in err

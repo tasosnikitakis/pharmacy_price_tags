@@ -279,8 +279,9 @@ def _price_state(p: Price) -> PriceState:
 # ---------------------------------------------------------------------------
 # Discovery and heartbeat
 
-#: Short codes avoid characters that are easy to misread on a small screen.
-SHORT_CODE_ALPHABET = "ACDEFGHJKLMNPQRTUVWXY34679"
+#: Short codes avoid characters that are easy to misread on a small screen or type
+#: wrongly from one: 0/O/Q, 1/I/L, 2/Z, 5/S and 8/B are left out, and G (like 6).
+SHORT_CODE_ALPHABET = "ACDEFHJKMNPRTUVWXY34679"
 SHORT_CODE_LENGTH = 4
 
 

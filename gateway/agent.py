@@ -19,11 +19,13 @@ import logging
 import os
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 
 import httpx
+from pydantic import ValidationError
 
 from gateway.config import GatewaySettings
 from gateway.drivers.base import PUSH_TIMEOUT_S, PushError, PushResult, SeenTag, TagDriver
@@ -195,7 +197,10 @@ class Agent:
         """Claim once and push every claimed job. Returns how many were claimed."""
         jobs = await self.core.claim(self.timings.max_jobs)
         for job in jobs:
-            await self.handle_job(job)
+            try:
+                await self.handle_job(job)
+            except Exception as exc:  # one bad job must not stop the others
+                log.warning("job %s not handled: %s", job.job_id, _describe(exc))
         return len(jobs)
 
     async def handle_job(self, job: ClaimedJob) -> PushResult | None:
@@ -223,32 +228,59 @@ class Agent:
         return await self.core.heartbeat(self.version, self.driver.vendor)
 
     async def run(self, stop: asyncio.Event) -> None:
-        """Run until ``stop`` is set."""
+        """Run until ``stop`` is set.
+
+        Heartbeat, discovery and job processing are independent steps: each has its
+        own error handling, and the heartbeat and discovery timers advance whether or
+        not their call succeeded, so a failing one never stops job processing. Any
+        failure (core unreachable, a malformed response, a driver or disk error) is
+        logged and followed by ``error_backoff_s``.
+        """
         next_heartbeat = next_discovery = 0.0
         t = self.timings
         while not stop.is_set():
-            wait = t.poll_interval_s
-            try:
-                now = time.monotonic()
-                if now >= next_heartbeat:
-                    await self.heartbeat_once()
-                    next_heartbeat = now + t.heartbeat_interval_s
-                if now >= next_discovery:
-                    await self.discover_once()
-                    next_discovery = now + t.discovery_interval_s
-                if await self.process_jobs():
-                    wait = 0.0  # there may be more
-            except httpx.HTTPError as exc:
-                log.warning("core not reachable: %s", _describe(exc))
+            failed = False
+            now = time.monotonic()
+            if now >= next_heartbeat:
+                next_heartbeat = now + t.heartbeat_interval_s
+                failed |= not await self._step("heartbeat", self.heartbeat_once)
+            if now >= next_discovery:
+                next_discovery = now + t.discovery_interval_s
+                failed |= not await self._step("discovery", self.discover_once)
+            claimed = 0
+
+            async def jobs() -> None:
+                nonlocal claimed
+                claimed = await self.process_jobs()
+
+            failed |= not await self._step("job processing", jobs)
+            if failed:
                 wait = t.error_backoff_s
+            elif claimed:
+                wait = 0.0  # there may be more
+            else:
+                wait = t.poll_interval_s
             if wait:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=wait)
 
     # Internals
 
+    async def _step(self, name: str, action: Callable[[], Awaitable[object]]) -> bool:
+        """Run one step of the loop; log any failure and return whether it succeeded."""
+        try:
+            await action()
+        except Exception as exc:
+            log.warning("%s failed: %s", name, _describe(exc))
+            return False
+        return True
+
     async def _image(self, render_hash: str) -> bytes:
-        cached = self.cache.get(render_hash)
+        try:
+            cached = self.cache.get(render_hash)
+        except OSError as exc:
+            log.warning("render cache not readable: %s", exc)
+            cached = None
         if cached is not None:
             return cached
         png = await self.core.render(render_hash)
@@ -294,8 +326,12 @@ class Agent:
                 await asyncio.sleep(self.timings.report_retry_delay_s * attempt)
 
 
-def _describe(exc: httpx.HTTPError) -> str:
-    """An error description without request headers (which hold the token)."""
+def _describe(exc: BaseException) -> str:
+    """A short error description without request headers (which hold the token)."""
     if isinstance(exc, httpx.HTTPStatusError):
         return f"HTTP {exc.response.status_code} from {exc.request.url.path}"
-    return type(exc).__name__
+    if isinstance(exc, httpx.HTTPError):
+        return type(exc).__name__  # the message may repeat the request
+    if isinstance(exc, ValidationError):
+        return f"malformed response ({exc.error_count()} errors)"
+    return f"{type(exc).__name__}: {str(exc)[:200]}"

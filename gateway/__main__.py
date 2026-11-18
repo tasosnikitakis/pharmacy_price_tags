@@ -16,12 +16,11 @@ from pathlib import Path
 from gateway.agent import Agent, CoreClient, RenderCache, make_http_client
 from gateway.config import GatewayConfigError, GatewaySettings, load_gateway_settings
 from gateway.drivers.base import TagDriver
+from gateway.drivers.fake import FakeConfigError, FakeDriver
 
 
 def build_driver(settings: GatewaySettings, fake_output: Path) -> TagDriver:
     if settings.gateway_driver == "fake":
-        from gateway.drivers.fake import FakeDriver
-
         return FakeDriver(output_dir=fake_output)
     raise GatewayConfigError("invalid configuration: GATEWAY_DRIVER: unknown driver")
 
@@ -48,8 +47,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
         asyncio.run(_main(args))
-    except GatewayConfigError as exc:
-        print(exc, file=sys.stderr)
+    except (GatewayConfigError, FakeConfigError, ValueError) as exc:
+        # One line, no traceback: these are configuration mistakes, not bugs.
+        print(f"gateway: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 0
