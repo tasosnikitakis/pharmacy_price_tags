@@ -65,7 +65,7 @@ class TagStatus:
     reachable: bool
     rssi: int | None
     battery_mv: int | None
-    battery_pct: int | None
+    battery_pct: int | None  # None unless the vendor reports a calibrated percentage
 
 
 @runtime_checkable

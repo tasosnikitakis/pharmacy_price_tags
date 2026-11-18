@@ -102,7 +102,8 @@ class NewPricePoint:
 class PriceEvent:
     """An ``event_log`` row a price change must write (kind and payload)."""
 
-    kind: str  # "promo.prior_set", "promo.prior_cleared", "promo.refused"
+    # "promo.prior_set", "promo.prior_cleared", "promo.refused", "promo.ended_rx"
+    kind: str
     payload: dict[str, object]
 
 
@@ -128,9 +129,13 @@ def apply_price_change(
     promo edit. Callers store exactly what it returns, in one transaction, with the
     ``price`` row locked (see ``history_rows_for_change``). Rules, in order:
 
-    1. ``promo_from`` is a timestamp, not a date. A promo added or changed by this
-       request must have ``promo_from >= now`` (a promo "from today" starts when it is
-       saved: the caller passes ``promo_from = now``); otherwise ``STARTS_IN_PAST``.
+    1. ``promo_from`` is a timestamp, not a date. A new promo, or one whose
+       ``promo_from`` this request changes, must have ``promo_from >= now`` (a promo
+       "from today" starts when it is saved: the caller passes ``promo_from = now``);
+       otherwise ``STARTS_IN_PAST``. A running promo keeps its ``promo_from`` and may
+       have ``promo_to`` or ``promo_cents`` edited; ``promo_to <= now`` ends it now.
+       Its prior price is still computed for its original ``promo_from``, so extending
+       a promo never pulls the promo's own price into its 30-day window.
     2. The manual prior price. ``requested.promo_prior_cents`` is ignored as input.
        ``entered_prior_cents`` is what an admin typed in this request: when given it is
        always accepted and stored, and always logged as ``promo.prior_set`` with the
@@ -147,7 +152,10 @@ def apply_price_change(
 
     Raises ``PromoRefused`` when ``requested`` itself adds or changes a promo that
     ``validate_promo`` refuses, or one that starts in the past: an edit is rejected,
-    not silently dropped.
+    not silently dropped. Every validation in this function, of the requested promo and
+    of a scheduled one, uses the same history: ``history`` plus the rows this change
+    appends, read with the override rule of ``PricePoint`` (so rows of a cancelled
+    scheduled promo never lower a prior price).
     """
     raise NotImplementedError
 
@@ -162,9 +170,11 @@ def apply_product_change(
     """Price consequences of a product edit; product edits use the same write path.
 
     When ``new.is_rx`` is set and ``price`` has a promo, active or scheduled, the
-    promo ends at ``now``: the returned state has no promo (and no manual prior price),
-    history gets a row at ``now`` with the regular price, and ``promo.ended_rx`` is
-    logged. Returns ``None`` when the edit changes nothing about the price. The caller
+    promo ends at ``now``: the returned state has no promo and no manual prior price,
+    history gets a ``regular`` row at ``now`` with source ``manual`` (only a person
+    sets ``is_rx``), and ``promo.ended_rx`` is logged, plus ``promo.prior_cleared``
+    if a manual prior price is dropped. A scheduled promo ends too: an Rx product may
+    not carry one at all. Returns ``None`` when the edit changes nothing about the price. The caller
     stores the result exactly as for ``apply_price_change``, in the same transaction
     as the product update, with the ``price`` row locked.
     """

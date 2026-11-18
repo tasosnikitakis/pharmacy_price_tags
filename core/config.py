@@ -88,10 +88,17 @@ def config_error(exc: ValidationError) -> ConfigError:
     Pydantic's own message echoes the raw input, which would print the other secrets
     to the log of a process that fails to start.
     """
-    problems = "; ".join(
-        f"{'.'.join(str(p) for p in err['loc']).upper()}: {err['msg']}" for err in exc.errors()
-    )
+    problems = "; ".join(f"{_field_label(err['loc'])}: {err['msg']}" for err in exc.errors())
     return ConfigError(f"invalid configuration: {problems}")
+
+
+#: Where an operator sets each value, when that differs from the field name.
+_SET_AS = {"DATABASE_PASSWORD": "DATABASE_PASSWORD (in Compose: POSTGRES_PASSWORD)"}
+
+
+def _field_label(loc: tuple[int | str, ...]) -> str:
+    name = ".".join(str(p) for p in loc).upper()
+    return _SET_AS.get(name, name)
 
 
 def check_secret(value: SecretStr) -> SecretStr:

@@ -281,7 +281,7 @@ The catalogue is the only thing tags render from. CSV import and manual edits ar
 | A discount must show the lowest price of the previous 30 days | Promo templates show a prior price: the lowest price in effect in the 30 days before the promo takes effect (`promo_from`), up to that moment, so a drop earlier the same day counts |
 | A promo must be a real reduction | The promo price must be strictly below both the prior price and the current regular price; otherwise the promo is refused (decision 0009) |
 | Promo start | `promo_from` is a timestamp, not a date. A promo "from today" starts when it is saved; a `promo_from` in the past is refused |
-| Less than 30 days of history | A promo cannot be activated until an admin enters the prior price by hand. An entered prior price is always accepted and logged, even if unchanged; it is cleared when the promo changes or ends |
+| Less than 30 days of history | A promo cannot be activated until an admin enters the prior price by hand. An entered prior price is always accepted and logged, even if unchanged. A stored one is cleared when the promo changes or ends, unless the admin enters one in the same edit |
 | Prescription medicines must not be promoted | Products with `is_rx` cannot be given a promo price or a promo template. Setting `is_rx` ends any active or scheduled promo and writes a history row for it |
 
 A promo label is never rendered without a valid prior price. Every write to a price, and every product edit that affects one, goes through `core.domain.pricing` (`apply_price_change`, `apply_product_change`), which applies these rules and writes the price history; decision 0008 describes how history is read. These checks live in `core/domain/` and have unit tests.

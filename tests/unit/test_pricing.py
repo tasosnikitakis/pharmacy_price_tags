@@ -188,7 +188,8 @@ def test_price_drop_earlier_the_same_day_counts_for_prior_price() -> None:
     """Regular 10,00 for 60 days, dropped to 9,00 three hours ago; a promo saved now
     takes effect now, so the 30-day window ends now and includes the drop."""
     now = T0
-    drop = PricePoint(900, 900, PriceKind.REGULAR, now - timedelta(hours=3), PriceSource.MANUAL)
+    drop = PricePoint(next(_seq), 900, PriceKind.REGULAR, now - timedelta(hours=3),
+                      PriceSource.MANUAL)  # fmt: skip
     history = [_point(1000, 60), drop]
     assert lowest_prior_price(history, now) == 900
     week = now + timedelta(days=7)
@@ -202,7 +203,45 @@ def test_price_drop_earlier_the_same_day_counts_for_prior_price() -> None:
             _product(), PriceState(900), PriceState(900, 950, now, week), history, now,
             PriceSource.MANUAL,
         )  # fmt: skip
-    assert exc.value.reason in (PromoRefusal.NOT_A_DISCOUNT, PromoRefusal.NOT_BELOW_REGULAR)
+    assert exc.value.reason is PromoRefusal.NOT_A_DISCOUNT  # prior is checked first
+
+
+def test_price_drop_reversed_the_same_day_still_sets_prior_price() -> None:
+    """10,00, then 9,00 at 07:00, back to 10,00 at 09:00, promo of 9,50 saved at 10:00.
+    Regular is 10,00 again, so only the 30-day window (which includes the 9,00 hours)
+    refuses the promo."""
+    now = datetime(2026, 12, 1, 8, 0, tzinfo=UTC)  # 10:00 Athens
+    seven, nine = now - timedelta(hours=3), now - timedelta(hours=1)
+    history = [
+        _point(1000, 60),
+        PricePoint(next(_seq), 900, PriceKind.REGULAR, seven, PriceSource.MANUAL),
+        PricePoint(next(_seq), 1000, PriceKind.REGULAR, nine, PriceSource.MANUAL),
+    ]
+    assert lowest_prior_price(history, now) == 900
+    with pytest.raises(PromoRefused) as exc:
+        apply_price_change(
+            _product(), PriceState(1000), PriceState(1000, 950, now, now + timedelta(days=7)),
+            history, now, PriceSource.MANUAL,
+        )  # fmt: skip
+    assert exc.value.reason is PromoRefusal.NOT_A_DISCOUNT
+
+
+def test_running_promo_can_be_extended_and_keeps_its_prior_price() -> None:
+    """A promo running since day -2 is extended on day 0. Its promo_from is in the past
+    but unchanged, so the edit is allowed, and the prior price is still the 30-day low
+    before the original start (10,00), not the promo's own 8,00."""
+    start = T0 - timedelta(days=2)
+    history = [_point(1000, 60), PricePoint(next(_seq), 800, PriceKind.PROMO, start,
+               PriceSource.PROMO)]  # fmt: skip
+    old = PriceState(1000, 800, start, T0 + timedelta(days=5))
+    longer = PriceState(1000, 800, start, T0 + timedelta(days=12))
+    change = apply_price_change(_product(), old, longer, history, T0, PriceSource.MANUAL)
+    assert change.state.promo_to == T0 + timedelta(days=12)
+    assert resolve_prior_price(history, change.state).cents == 1000
+    moved = PriceState(1000, 800, start + timedelta(hours=1), T0 + timedelta(days=12))
+    with pytest.raises(PromoRefused) as exc:  # moving promo_from into the past is not
+        apply_price_change(_product(), old, moved, history, T0, PriceSource.MANUAL)
+    assert exc.value.reason is PromoRefusal.STARTS_IN_PAST
 
 
 def test_promo_starting_in_the_past_is_refused() -> None:

@@ -61,8 +61,10 @@ class PriceState:
     A promo is either fully set (``promo_cents``, ``promo_from``, ``promo_to``) or
     fully absent; ``promo_to`` is exclusive. ``promo_prior_cents`` is the prior price
     an admin entered by hand for this promo, used only when there is less than 30 days
-    of history. ``core.domain.pricing.apply_price_change`` clears it whenever the
-    promo ends or any promo field changes, and emits ``promo.prior_set`` when it is set.
+    of history. ``core.domain.pricing.apply_price_change`` owns it: a prior price an
+    admin enters in a request is always stored and logged (``promo.prior_set``), even if
+    unchanged; one carried over from before is cleared when the promo ends or a promo
+    field changes, unless the same request enters one. See rule 2 there.
     """
 
     regular_cents: int
@@ -84,7 +86,8 @@ class PricePoint:
     no later row has overridden at ``t``. ``valid_from`` may be in the future (a
     scheduled promo start or end). Both kinds count towards the 30-day lowest price.
 
-    Rows are only ever produced by ``core.domain.pricing.apply_price_change``.
+    Rows are only ever produced by ``core.domain.pricing.apply_price_change`` and
+    ``core.domain.pricing.apply_product_change``.
     """
 
     seq: int

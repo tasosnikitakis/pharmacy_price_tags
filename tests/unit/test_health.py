@@ -27,6 +27,10 @@ def _fake_url(password: str | None = None, host: str = "db") -> str:
     return url.render_as_string(hide_password=False)
 
 
+# Secret files are written as bytes: on Windows, write_text() would turn "\n" into
+# "\r\n", and read_secret_file deliberately keeps a "\r" (as Postgres does).
+
+
 def _fake_password() -> str:
     return secrets.token_hex(12)
 
@@ -113,7 +117,7 @@ def test_database_password_from_secret_file(
     from core.config import DatabaseSettings
 
     password = _fake_password()
-    (tmp_path / "database_password").write_text(password + "\n", encoding="utf-8")
+    (tmp_path / "database_password").write_bytes((password + "\n").encode())
     monkeypatch.setenv("DATABASE_URL", _fake_url())
     monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
     settings = DatabaseSettings(_secrets_dir=tmp_path)
@@ -125,7 +129,7 @@ def test_database_password_given_twice_is_rejected(
 ) -> None:
     from core.config import DatabaseSettings
 
-    (tmp_path / "database_password").write_text(_fake_password(), encoding="utf-8")
+    (tmp_path / "database_password").write_bytes((_fake_password()).encode())
     monkeypatch.setenv("DATABASE_URL", _fake_url(_fake_password()))
     with pytest.raises(ValueError, match="twice"):
         DatabaseSettings(_secrets_dir=tmp_path)
@@ -136,7 +140,7 @@ def test_empty_database_password_is_rejected(
 ) -> None:
     from core.config import DatabaseSettings
 
-    (tmp_path / "database_password").write_text("", encoding="utf-8")
+    (tmp_path / "database_password").write_bytes(b"")
     monkeypatch.setenv("DATABASE_URL", _fake_url())
     with pytest.raises(ValueError, match="empty"):
         DatabaseSettings(_secrets_dir=tmp_path)
@@ -175,7 +179,7 @@ def test_secret_file_password_is_escaped_and_newline_stripped(
 
     # Generated per run, so the repository holds no password-shaped literals.
     password = f"{secrets.token_hex(4)}{reserved}{secrets.token_hex(4)}"
-    (tmp_path / "database_password").write_text(password + "\n", encoding="utf-8")
+    (tmp_path / "database_password").write_bytes((password + "\n").encode())
     monkeypatch.setenv("DATABASE_URL", _fake_url())
     monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
     rendered = DatabaseSettings(_secrets_dir=tmp_path).database_url.get_secret_value()
@@ -206,7 +210,7 @@ def test_secret_file_loses_only_trailing_newlines(
     from core.config import DatabaseSettings, read_secret_file
 
     password = _fake_password()
-    (tmp_path / "database_password").write_text(password + suffix, encoding="utf-8")
+    (tmp_path / "database_password").write_bytes((password + suffix).encode())
     assert read_secret_file(tmp_path / "database_password") == password
     monkeypatch.setenv("DATABASE_URL", _fake_url())
     monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
@@ -222,11 +226,26 @@ def test_secret_file_password_with_surrounding_whitespace_is_refused(
     so the passwords would differ; refuse at startup instead."""
     from core.config import DatabaseSettings
 
-    (tmp_path / "database_password").write_text(wrap.format(_fake_password()), encoding="utf-8")
+    (tmp_path / "database_password").write_bytes((wrap.format(_fake_password())).encode())
     monkeypatch.setenv("DATABASE_URL", _fake_url())
     monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
     with pytest.raises(ValidationError, match="whitespace"):
         DatabaseSettings(_secrets_dir=tmp_path)
+
+
+def test_config_error_names_the_compose_variable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from core.config import DatabaseSettings, config_error
+
+    (tmp_path / "database_password").write_bytes(b" padded\n")
+    monkeypatch.setenv("DATABASE_URL", _fake_url())
+    monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
+    with pytest.raises(ValidationError) as exc:
+        DatabaseSettings(_secrets_dir=tmp_path)
+    message = str(config_error(exc.value))
+    assert "DATABASE_PASSWORD (in Compose: POSTGRES_PASSWORD)" in message
+    assert "padded" not in message
 
 
 @pytest.mark.parametrize("name", ["SESSION_SECRET", "GATEWAY_TOKEN"])
@@ -246,8 +265,8 @@ def test_app_secrets_read_from_files(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     from core.config import Settings
 
     session, token = secrets.token_hex(32), secrets.token_hex(32)
-    (tmp_path / "session_secret").write_text(session + "\n", encoding="utf-8")
-    (tmp_path / "gateway_token").write_text(token + "\n", encoding="utf-8")
+    (tmp_path / "session_secret").write_bytes((session + "\n").encode())
+    (tmp_path / "gateway_token").write_bytes((token + "\n").encode())
     monkeypatch.delenv("SESSION_SECRET")
     monkeypatch.delenv("GATEWAY_TOKEN")
     settings = Settings(_secrets_dir=tmp_path)

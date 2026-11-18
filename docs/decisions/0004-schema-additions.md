@@ -12,6 +12,7 @@ of the plan needs, so workstreams rarely need migrations of their own:
 | `price` | `promo_prior_cents` | Section 6: prior price entered by hand when history is under 30 days |
 | `price_history` | `import_run_id`, `created_at` | Tracing a change to its import |
 | `tag` | `battery_mv`, `battery_pct` instead of one `battery` | Tags report voltage or percent; unknown until M4 |
+| `tag` | `firmware` (migration 0002) | Firmware version reported in discovery (`SeenTagReport.firmware`) |
 | `tag` | `desired_hash_changed_at` | Telling a stale `dead` job from a current one (reconciler) |
 | `tag_type` | `key` (e.g. `gicisky-2.9-bwr`) | Stable identifier for render hashes and the gateway API |
 | `update_job` | `cancelled` state, `claimed_at`, `error_code`, `created_at`, `updated_at` | Cancel-and-replace; 5-minute claim timeout |
