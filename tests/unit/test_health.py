@@ -159,17 +159,22 @@ def test_database_url_with_password_used_as_is_without_secret_file(
         assert settings.database_url.get_secret_value() == url
 
 
-@pytest.mark.parametrize(
-    "password", ["p@ss/w:rd%+#?x", "a%40b", "colon:only", "slash/only", "x@y", "spa ce"]
-)
+#: Characters that must be escaped in a URL's password, and a pre-escaped look-alike
+#: ("%40" must stay the three characters %, 4, 0 and not become "@").
+_RESERVED = ["@", "/", ":", "%", "+", "#", "?", " ", "@/:%+#?", "%40"]
+
+
+@pytest.mark.parametrize("reserved", _RESERVED)
 def test_secret_file_password_is_escaped_and_newline_stripped(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, password: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reserved: str
 ) -> None:
     from sqlalchemy import create_engine
     from sqlalchemy.engine import make_url
 
     from core.config import DatabaseSettings
 
+    # Generated per run, so the repository holds no password-shaped literals.
+    password = f"{secrets.token_hex(4)}{reserved}{secrets.token_hex(4)}"
     (tmp_path / "database_password").write_text(password + "\n", encoding="utf-8")
     monkeypatch.setenv("DATABASE_URL", _fake_url())
     monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
