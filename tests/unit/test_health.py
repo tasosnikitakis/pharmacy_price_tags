@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import unquote
@@ -14,6 +15,19 @@ from sqlalchemy.orm import Session
 from core.app.main import create_app
 from core.config import ConfigError, get_settings
 from core.db.session import get_session
+
+
+def _fake_url(password: str | None = None, host: str = "db") -> str:
+    """A database URL for config tests. Passwords are generated per run, so the
+    repository contains no password-shaped literals for secret scanners to flag."""
+    from sqlalchemy import URL
+
+    url = URL.create("postgresql+psycopg", "esl", password, host, 5432, "esl")
+    return url.render_as_string(hide_password=False)
+
+
+def _fake_password() -> str:
+    return secrets.token_hex(12)
 
 
 def test_health_ok_with_database(db: Session) -> None:
@@ -51,7 +65,8 @@ def test_app_refuses_to_start_without_secret(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, missing: str
 ) -> None:
     monkeypatch.chdir(tmp_path)  # no .env to fall back on
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u:p@localhost/db")
+    db_password = _fake_password()
+    monkeypatch.setenv("DATABASE_URL", _fake_url(db_password))
     monkeypatch.delenv(missing)
     get_settings.cache_clear()
     try:
@@ -62,7 +77,7 @@ def test_app_refuses_to_start_without_secret(
     for name in ("SESSION_SECRET", "GATEWAY_TOKEN"):
         if name != missing:
             assert os.environ[name] not in str(exc.value)  # never echo other secrets
-    assert "u:p@" not in str(exc.value)
+    assert db_password not in str(exc.value)
 
 
 def test_short_secret_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,13 +111,12 @@ def test_database_password_from_secret_file(
 ) -> None:
     from core.config import DatabaseSettings
 
-    (tmp_path / "database_password").write_text("s3cret-from-file\n", encoding="utf-8")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl@db:5432/esl")
+    password = _fake_password()
+    (tmp_path / "database_password").write_text(password + "\n", encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", _fake_url())
     monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
     settings = DatabaseSettings(_secrets_dir=tmp_path)
-    assert settings.database_url.get_secret_value() == (
-        "postgresql+psycopg://esl:s3cret-from-file@db:5432/esl"
-    )
+    assert settings.database_url.get_secret_value() == _fake_url(password)
 
 
 def test_database_password_given_twice_is_rejected(
@@ -110,8 +124,8 @@ def test_database_password_given_twice_is_rejected(
 ) -> None:
     from core.config import DatabaseSettings
 
-    (tmp_path / "database_password").write_text("from-file", encoding="utf-8")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl:other@db:5432/esl")
+    (tmp_path / "database_password").write_text(_fake_password(), encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", _fake_url(_fake_password()))
     with pytest.raises(ValueError, match="twice"):
         DatabaseSettings(_secrets_dir=tmp_path)
 
@@ -122,7 +136,7 @@ def test_empty_database_password_is_rejected(
     from core.config import DatabaseSettings
 
     (tmp_path / "database_password").write_text("", encoding="utf-8")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl@db:5432/esl")
+    monkeypatch.setenv("DATABASE_URL", _fake_url())
     with pytest.raises(ValueError, match="empty"):
         DatabaseSettings(_secrets_dir=tmp_path)
 
@@ -134,7 +148,7 @@ def test_database_url_with_password_used_as_is_without_secret_file(
     """Cloud sessions, CI and Windows: no secret file, DATABASE_URL taken verbatim."""
     from core.config import DatabaseSettings
 
-    url = "postgresql+psycopg://esl:dev-pass@localhost:5432/esl"
+    url = _fake_url(_fake_password(), host="localhost")
     monkeypatch.chdir(tmp_path)  # no .env
     monkeypatch.setenv("DATABASE_URL", url)
     monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
@@ -156,7 +170,7 @@ def test_secret_file_password_is_escaped_and_newline_stripped(
     from core.config import DatabaseSettings
 
     (tmp_path / "database_password").write_text(password + "\n", encoding="utf-8")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl@db:5432/esl")
+    monkeypatch.setenv("DATABASE_URL", _fake_url())
     monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
     rendered = DatabaseSettings(_secrets_dir=tmp_path).database_url.get_secret_value()
 
