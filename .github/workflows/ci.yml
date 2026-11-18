@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: ruff, mypy, migrations, pytest
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: esl
+          POSTGRES_DB: esl
+          # Throwaway service container reachable only from this job: no password.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U esl -d esl"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgresql+psycopg://esl@localhost:5432/esl
+    steps:
+      - uses: actions/checkout@v4
+      - name: Throwaway secrets for this run
+        run: |
+          echo "SESSION_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "GATEWAY_TOKEN=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.x"
+      - run: uv python install 3.12
+      - run: uv sync --all-extras --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run alembic upgrade head
+      - run: uv run alembic check
+      - run: uv run pytest
+
+  compose:
+    name: docker compose serves /health
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Throwaway secrets for this run
+        run: |
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "SESSION_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "GATEWAY_TOKEN=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+      - run: docker compose build
+      - name: Compose refuses to start without secrets
+        run: |
+          for name in POSTGRES_PASSWORD SESSION_SECRET GATEWAY_TOKEN; do
+            if env -u "$name" docker compose up -d --no-build >/dev/null 2>&1; then
+              echo "compose accepted a missing $name"; exit 1
+            fi
+            docker compose down -v >/dev/null 2>&1 || true
+          done
+      - run: docker compose up -d --no-build --wait --wait-timeout 180
+      - name: GET /health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health; then exit 0; fi
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+      - if: always()
+        run: docker compose down -v
