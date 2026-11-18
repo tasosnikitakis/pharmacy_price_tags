@@ -8,10 +8,10 @@ Contract: changes go through the lead agent.
 
 from __future__ import annotations
 
-from datetime import datetime
 from enum import StrEnum
+from typing import Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from shared.tag_types import TagType
 
@@ -75,25 +75,49 @@ RENDER_MEDIA_TYPE = "image/png"
 
 
 class JobResultRequest(_Model):
-    """Result of one push. ``error_code`` is required when ``outcome`` is ``failed``."""
+    """Result of one push. ``failed`` needs an ``error_code``; ``acked`` must have none.
+
+    Violations are rejected with 422 before they reach the state machine.
+    """
 
     outcome: JobOutcome
     error_code: PushErrorCode | None = None
     error_detail: str | None = Field(default=None, max_length=500)
     duration_ms: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def _code_matches_outcome(self) -> Self:
+        if self.outcome is JobOutcome.FAILED and self.error_code is None:
+            raise ValueError("a failed result needs an error_code")
+        if self.outcome is JobOutcome.ACKED and self.error_code is not None:
+            raise ValueError("an acked result has no error_code")
+        return self
+
+
+#: Values of ``update_job.state``; mirrors ``core.domain.reconciler.JobState``.
+JobStateName = Literal["queued", "claimed", "acked", "failed", "dead", "cancelled"]
+
 
 class JobResultResponse(_Model):
     """State of the job after the core processed the result."""
 
     job_id: int
-    state: str
+    state: JobStateName
 
 
 # POST /gateway/v1/tags/seen
 
 
 class SeenTagReport(_Model):
+    """One tag seen during discovery.
+
+    The core matches ``(vendor, model)`` to a ``tag_type`` row by its ``vendor`` and
+    ``model`` columns. A known ``vendor_id`` updates that tag's last-seen data. An
+    unknown ``vendor_id`` creates a new unbound tag only when the type matches;
+    otherwise (``model`` is ``None`` or matches no ``tag_type``) nothing is stored and
+    the report is counted as ``ignored``.
+    """
+
     vendor_id: str
     vendor: str
     model: str | None = None
@@ -110,6 +134,7 @@ class TagsSeenRequest(_Model):
 class TagsSeenResponse(_Model):
     known: int = Field(description="Reports that matched a tag already in the catalogue")
     created: int = Field(description="Reports that created a new, unbound tag")
+    ignored: int = Field(description="New tags whose model matched no tag_type")
 
 
 # POST /gateway/v1/heartbeat
@@ -121,4 +146,4 @@ class HeartbeatRequest(_Model):
 
 
 class HeartbeatResponse(_Model):
-    server_time: datetime
+    server_time: AwareDatetime

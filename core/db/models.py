@@ -221,11 +221,18 @@ class Tag(Base):
     battery_pct: Mapped[int | None] = mapped_column(Integer)
     displayed_hash: Mapped[str | None] = mapped_column(String(64))
     desired_hash: Mapped[str | None] = mapped_column(String(64))
+    # Set whenever desired_hash changes; lets the reconciler tell a stale dead job.
+    desired_hash_changed_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = _now()
 
 
 class Template(Base):
-    """Templates are code-defined; a row records which key/version exists per tag type."""
+    """Templates are code-defined; a row records which key/version exists per tag type.
+
+    A binding's template row fixes the template *key*; rendering always uses the
+    current code version of that key (``TEMPLATE_VERSIONS``), so a version bump needs
+    no binding migration. Rows of older versions stay for the record.
+    """
 
     __tablename__ = "template"
     __table_args__ = (UniqueConstraint("store_id", "key", "version", "tag_type_id"),)

@@ -43,7 +43,7 @@ class LabelData:
     price_text: str | None = None  # "12,90 €"
     unit_price_text: str | None = None  # "22,50 €/kg"
     prior_price_text: str | None = None  # promo only, shown struck through
-    promo_until_text: str | None = None  # promo only, e.g. "έως 30/11"
+    promo_until_text: str | None = None  # promo only, last day in effect, "30/11"
     short_code: str | None = None  # unassigned only
     tag_model: str | None = None  # unassigned only
 

@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from core.config import get_settings
 from core.db.session import get_session
 
 VERSION = "0.1.0"
@@ -22,6 +23,8 @@ class Health(BaseModel):
 
 
 def create_app() -> FastAPI:
+    # Fail fast: a missing or weak secret stops the process before it serves anything.
+    get_settings()
     app = FastAPI(title="Pharmacy ESL core", version=VERSION)
 
     @app.get("/health", response_model=Health)

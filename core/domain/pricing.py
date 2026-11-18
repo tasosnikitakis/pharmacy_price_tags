@@ -11,7 +11,15 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from zoneinfo import ZoneInfo
 
-from core.domain.types import PackUnit, PricePoint, PriceState, ProductFacts, UnitBasis
+from core.domain.types import (
+    PackUnit,
+    PriceKind,
+    PricePoint,
+    PriceSource,
+    PriceState,
+    ProductFacts,
+    UnitBasis,
+)
 from core.render.label import LabelData, TemplateKey
 
 #: Window before ``promo_from`` in which the lowest earlier price is looked up.
@@ -75,14 +83,53 @@ def format_unit_price(unit: UnitPrice) -> str:
     raise NotImplementedError
 
 
+@dataclass(frozen=True, slots=True)
+class NewPricePoint:
+    """A ``price_history`` row to append; the database assigns its ``seq`` (id)."""
+
+    effective_cents: int
+    kind: PriceKind
+    valid_from: datetime
+    source: PriceSource
+
+
+def history_rows_for_change(
+    new: PriceState, now: datetime, source: PriceSource
+) -> list[NewPricePoint]:
+    """The ``price_history`` rows to append after any write to a ``price`` row.
+
+    The single writer of history, used by imports, manual edits and promo edits alike,
+    so every caller follows the same rules (see ``PricePoint`` for how rows are read).
+    Returned in the order they must be inserted:
+
+    1. At ``now``: the price in effect now under ``new`` (``promo`` kind if the promo is
+       active, else ``regular``), with ``source``.
+    2. If the promo starts later: a ``promo`` row at ``promo_from``, source ``promo``.
+    3. If the promo ends later: a ``regular`` row at ``promo_to``, source ``promo``.
+
+    Because later rows override the timeline from their ``valid_from`` on, row 1 also
+    cancels any previously scheduled promo rows that ``new`` no longer contains.
+    """
+    raise NotImplementedError
+
+
+def price_timeline(
+    history: Sequence[PricePoint],
+) -> list[tuple[datetime, int, PriceKind]]:
+    """Resolve history into ``(start, effective_cents, kind)`` segments, sorted by
+    start, applying the override rule in ``PricePoint``. Each segment runs until the
+    next one starts; the last one is open-ended. Adjacent equal prices are kept."""
+    raise NotImplementedError
+
+
 def lowest_prior_price(history: Sequence[PricePoint], promo_from: datetime) -> int | None:
     """Lowest price in effect during the 30 days before ``promo_from``.
 
-    The window is ``[promo_from - 30 days, promo_from)``. A price counts if it was in
-    effect at any moment of the window, including the price already in effect when
-    the window opens. Returns ``None`` when the history does not cover the whole
-    window (the earliest entry is later than the window start), because then the
-    lowest price of the previous 30 days is not known.
+    The window is ``[promo_from - 30 days, promo_from)``, evaluated on
+    ``price_timeline(history)``. A price counts if it was in effect at any moment of the
+    window, including the price already in effect when the window opens; both regular
+    and earlier promo prices count. Returns ``None`` when the timeline starts after the
+    window start, because then the lowest price of the previous 30 days is not known.
     """
     raise NotImplementedError
 
@@ -103,14 +150,15 @@ def validate_promo(
     """Check that ``price``'s promo may be activated, and return its prior price.
 
     Refuses (raises ``PromoRefused``) when the product is prescription-only, the
-    period is missing or ``promo_to <= promo_from``, the promo price is not below the
-    prior price, or there is no prior price.
+    period is missing or ``promo_to <= promo_from``, there is no prior price, or the
+    promo price is not below the prior price (``NOT_A_DISCOUNT``, docs/decisions/0009).
     """
     raise NotImplementedError
 
 
 def promo_active(price: PriceState, now: datetime) -> bool:
-    """True when a promo is set and ``promo_from <= now < promo_to``."""
+    """True when a promo is set and ``promo_from <= now < promo_to`` (``promo_to`` is
+    exclusive)."""
     raise NotImplementedError
 
 
@@ -131,7 +179,12 @@ def build_label_data(
 
     For ``promo`` this calls ``validate_promo`` and so raises ``PromoRefused`` rather
     than build a promo label without a prior price. For ``unit_price`` it raises
-    ``ValueError`` if pack size or unit is missing. Dates are shown in ``DISPLAY_TZ``.
+    ``ValueError`` if pack size or unit is missing.
+
+    ``promo_until_text`` is the last day the promo is in effect, as ``DD/MM`` in
+    ``DISPLAY_TZ``: the date of ``promo_to - 1 microsecond``, because ``promo_to`` is
+    exclusive. A promo through 30/11 inclusive has ``promo_to`` = 01/12 00:00 Athens
+    time and shows ``"30/11"``. Wording around it ("έως") belongs to the template.
     Not for ``unassigned``; use ``unassigned_label_data``.
     """
     raise NotImplementedError

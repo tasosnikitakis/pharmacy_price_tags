@@ -30,7 +30,7 @@ OLD, NEW = "a" * 64, "b" * 64
 
 
 def _job(state: JobState, render_hash: str = OLD, attempts: int = 0, **kw: object) -> JobSnapshot:
-    fields: dict[str, object] = dict(next_attempt_at=None, claimed_at=None)
+    fields: dict[str, object] = dict(next_attempt_at=None, claimed_at=None, created_at=NOW)
     fields.update(kw)
     return JobSnapshot(1, 10, render_hash, state, attempts, **fields)  # type: ignore[arg-type]
 
@@ -65,13 +65,23 @@ def test_up_to_date_tag_needs_nothing() -> None:
 
 
 def test_dead_job_is_not_recreated_for_same_hash() -> None:
-    dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS)
-    assert plan_updates([TagSnapshot(10, NEW, OLD)], [], latest_dead=[dead]) == []
+    dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS, created_at=NOW)
+    tag = TagSnapshot(10, NEW, OLD, desired_hash_changed_at=NOW - timedelta(minutes=1))
+    assert plan_updates([tag], [], latest_dead=[dead]) == []
 
 
-def test_claim_counts_attempt() -> None:
-    t = claim(_job(JobState.QUEUED), NOW)
-    assert (t.state, t.attempts) == (JobState.CLAIMED, 1)
+def test_stale_dead_job_does_not_block_same_hash_later() -> None:
+    """Price goes to X (dead), back to the displayed price, then to X again: the
+    old dead job must not stop the new push."""
+    dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS, created_at=NOW - timedelta(hours=2))
+    tag = TagSnapshot(10, NEW, OLD, desired_hash_changed_at=NOW)
+    assert plan_updates([tag], [], latest_dead=[dead]) == [CreateJob(10, NEW)]
+
+
+def test_claim_counts_attempt_and_sets_claim_fields() -> None:
+    t = claim(_job(JobState.QUEUED, attempts=0), gateway_id=3, now=NOW)
+    assert (t.state, t.attempts, t.claimed_at, t.gateway_id) == (JobState.CLAIMED, 1, NOW, 3)
+    assert (t.error_code, t.error, t.next_attempt_at) == (None, None, None)
 
 
 def test_backoff_schedule() -> None:
@@ -83,7 +93,7 @@ def test_backoff_schedule() -> None:
 def test_failures_end_in_dead_after_max_attempts() -> None:
     job = _job(JobState.QUEUED)
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        c = claim(job, NOW)
+        c = claim(job, 1, NOW)
         job = _job(JobState.CLAIMED, attempts=c.attempts, claimed_at=NOW)
         r = apply_result(job, JobOutcome.FAILED, PushErrorCode.TIMEOUT, NOW)
         expected = JobState.DEAD if attempt == MAX_ATTEMPTS else JobState.FAILED
@@ -95,4 +105,9 @@ def test_stale_claim_returns_to_queued() -> None:
     stale = _job(JobState.CLAIMED, attempts=1, claimed_at=NOW - timedelta(minutes=6))
     fresh = _job(JobState.CLAIMED, attempts=1, claimed_at=NOW - timedelta(minutes=1))
     transitions = reclaim_stale([stale, fresh], NOW)
-    assert [t.state for t in transitions] == [JobState.QUEUED]
+    assert [(t.state, t.claimed_at) for t in transitions] == [(JobState.QUEUED, None)]
+
+
+def test_stale_claim_at_max_attempts_is_dead() -> None:
+    stale = _job(JobState.CLAIMED, attempts=MAX_ATTEMPTS, claimed_at=NOW - timedelta(minutes=6))
+    assert [t.state for t in reclaim_stale([stale], NOW)] == [JobState.DEAD]

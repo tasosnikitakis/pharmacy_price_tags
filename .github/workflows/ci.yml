@@ -17,16 +17,21 @@ jobs:
         image: postgres:16
         env:
           POSTGRES_USER: esl
-          POSTGRES_PASSWORD: esl
           POSTGRES_DB: esl
+          # Throwaway service container reachable only from this job: no password.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U esl -d esl"
           --health-interval 2s --health-timeout 3s --health-retries 30
     env:
-      DATABASE_URL: postgresql+psycopg://esl:esl@localhost:5432/esl
+      DATABASE_URL: postgresql+psycopg://esl@localhost:5432/esl
     steps:
       - uses: actions/checkout@v4
+      - name: Throwaway secrets for this run
+        run: |
+          echo "SESSION_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "GATEWAY_TOKEN=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.x"
@@ -44,6 +49,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Throwaway secrets for this run
+        run: |
+          echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
+          echo "SESSION_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "GATEWAY_TOKEN=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+      - name: Compose refuses to start without secrets
+        run: |
+          if env -u SESSION_SECRET docker compose config >/dev/null 2>&1; then
+            echo "compose accepted a missing SESSION_SECRET"; exit 1
+          fi
       - run: docker compose up -d --build --wait --wait-timeout 180
       - name: GET /health
         run: |

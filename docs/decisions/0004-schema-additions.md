@@ -11,6 +11,7 @@ of the plan needs, so workstreams rarely need migrations of their own:
 | `price` | `promo_prior_cents` | Section 6: prior price entered by hand when history is under 30 days |
 | `price_history` | `import_run_id`, `created_at` | Tracing a change to its import |
 | `tag` | `battery_mv`, `battery_pct` instead of one `battery` | Tags report voltage or percent; unknown until M4 |
+| `tag` | `desired_hash_changed_at` | Telling a stale `dead` job from a current one (reconciler) |
 | `tag_type` | `key` (e.g. `gicisky-2.9-bwr`) | Stable identifier for render hashes and the gateway API |
 | `update_job` | `cancelled` state, `claimed_at`, `error_code`, `created_at`, `updated_at` | Cancel-and-replace; 5-minute claim timeout |
 | `gateway` | `driver` | Shown in monitoring |
@@ -22,4 +23,9 @@ Rules attached to them:
 - A partial unique index allows at most one active (`queued`, `claimed`, `failed`) job
   per tag. A claimed job is never cancelled; see `core/domain/reconciler.py`.
 - `price_history` and `event_log` are append-only, enforced by a trigger.
-- The migration seeds store 1 (`Europe/Athens`); every `store_id` defaults to 1.
+- The migration seeds store 1 (`Europe/Athens`) and advances the `store` id sequence;
+  every `store_id` defaults to 1.
+- `binding.template_id` fixes the template *key*. Rendering always uses the current
+  code version of that key, so bumping a template version needs no binding migration.
+- New tags from discovery are created only when `(vendor, model)` matches a
+  `tag_type` row; otherwise the report is counted as `ignored` (`TagsSeenResponse`).

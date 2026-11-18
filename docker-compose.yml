@@ -1,14 +1,16 @@
 # Core and Postgres for development and the shop box. The gateway is not here:
 # Bluetooth inside containers is unreliable, so it runs natively under systemd.
 #
-# Set POSTGRES_PASSWORD in .env for anything but local development.
+# Secrets are required and have no defaults (docs/decisions/0010). Generate them with
+#   python -m core.gen_secrets >> .env
+# Postgres publishes no port: only core reaches it, over the Compose network.
 
 services:
   db:
     image: postgres:16
     environment:
       POSTGRES_USER: esl
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-esl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: esl
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -22,7 +24,9 @@ services:
   core:
     build: .
     environment:
-      DATABASE_URL: postgresql+psycopg://esl:${POSTGRES_PASSWORD:-esl}@db:5432/esl
+      DATABASE_URL: postgresql+psycopg://esl:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/esl
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?set GATEWAY_TOKEN in .env}
     depends_on:
       db:
         condition: service_healthy

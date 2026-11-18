@@ -68,6 +68,13 @@ def test_store_is_seeded(scratch_engine: Engine) -> None:
     assert [tuple(r) for r in rows] == [(1, "Europe/Athens")]
 
 
+def test_store_sequence_is_past_seed(scratch_engine: Engine) -> None:
+    with scratch_engine.connect() as conn, conn.begin():
+        new_id = conn.execute(text("INSERT INTO store (name) VALUES ('x') RETURNING id"))
+        assert new_id.scalar_one() == 2
+        conn.rollback()
+
+
 def _product(conn: Connection) -> int:
     return int(
         conn.execute(

@@ -59,8 +59,11 @@ class PriceState:
     """Current price of one product (the ``price`` row).
 
     A promo is either fully set (``promo_cents``, ``promo_from``, ``promo_to``) or
-    fully absent. ``promo_prior_cents`` is the prior price an admin entered by hand
-    for this promo, used only when there is less than 30 days of history.
+    fully absent; ``promo_to`` is exclusive. ``promo_prior_cents`` is the prior price
+    an admin entered by hand for this promo, used only when there is less than 30 days
+    of history. Whoever writes ``price`` must clear it whenever the promo ends or any
+    promo field changes, and write an ``event_log`` row (kind ``promo.prior_set``) when
+    setting it.
     """
 
     regular_cents: int
@@ -72,8 +75,20 @@ class PriceState:
 
 @dataclass(frozen=True, slots=True)
 class PricePoint:
-    """One ``price_history`` row: ``effective_cents`` applied from ``valid_from`` on."""
+    """One ``price_history`` row.
 
+    Meaning (docs/decisions/0008): the row says "from ``valid_from`` on, the shelf
+    price is ``effective_cents``". Rows are applied in ``seq`` order (the row id), and
+    each row overrides the timeline from its ``valid_from`` onward, replacing anything
+    earlier rows said about that period. So the price in effect at time ``t`` comes
+    from the row with the highest ``seq`` among rows whose ``valid_from <= t`` and that
+    no later row has overridden at ``t``. ``valid_from`` may be in the future (a
+    scheduled promo start or end). Both kinds count towards the 30-day lowest price.
+
+    Rows are only ever produced by ``core.domain.pricing.history_rows_for_change``.
+    """
+
+    seq: int
     effective_cents: int
     kind: PriceKind
     valid_from: datetime

@@ -14,6 +14,7 @@ from core.domain.pricing import (
     build_label_data,
     choose_template,
     format_price,
+    history_rows_for_change,
     lowest_prior_price,
     resolve_prior_price,
     unit_price,
@@ -35,10 +36,12 @@ pytestmark = pytest.mark.xfail(raises=NotImplementedError, reason="workstream B"
 T0 = datetime(2026, 12, 1, 8, 0, tzinfo=UTC)
 
 
-def _point(cents: int, days_before: int) -> PricePoint:
-    return PricePoint(
-        cents, PriceKind.REGULAR, T0 - timedelta(days=days_before), PriceSource.IMPORT
-    )
+_seq = iter(range(1, 10_000))
+
+
+def _point(cents: int, days_before: int, kind: PriceKind = PriceKind.REGULAR) -> PricePoint:
+    when = T0 - timedelta(days=days_before)
+    return PricePoint(next(_seq), cents, kind, when, PriceSource.IMPORT)
 
 
 def _product(**kw: object) -> ProductFacts:
@@ -64,6 +67,48 @@ def test_unit_price_per_kg() -> None:
 def test_lowest_prior_price_includes_price_in_effect_at_window_start() -> None:
     history = [_point(900, 60), _point(1200, 20), _point(1100, 5)]
     assert lowest_prior_price(history, T0) == 900
+
+
+def test_earlier_promo_counts_but_only_while_in_effect() -> None:
+    """Regular 10,00 from day -60; promo 8,00 from day -50 to day -40 (closing
+    regular row written with the promo): the prior price for day 0 is 10,00."""
+    history = [_point(1000, 60), _point(800, 50, PriceKind.PROMO), _point(1000, 40)]
+    assert lowest_prior_price(history, T0) == 1000
+
+
+def test_promo_inside_window_lowers_prior_price() -> None:
+    history = [_point(1000, 60), _point(800, 20, PriceKind.PROMO), _point(1000, 10)]
+    assert lowest_prior_price(history, T0) == 800
+
+
+def test_later_row_overrides_scheduled_rows() -> None:
+    """A promo scheduled for day -20..-10 was cancelled on day -25: it never applied."""
+    history = [
+        _point(1000, 60),
+        _point(800, 20, PriceKind.PROMO),
+        _point(1000, 10),
+        _point(1000, 25),
+    ]
+    assert lowest_prior_price(history, T0) == 1000
+
+
+def test_history_rows_for_scheduled_promo() -> None:
+    now = T0 - timedelta(days=1)
+    price = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    rows = history_rows_for_change(price, now, PriceSource.MANUAL)
+    assert [(r.effective_cents, r.kind, r.valid_from, r.source) for r in rows] == [
+        (1000, PriceKind.REGULAR, now, PriceSource.MANUAL),
+        (800, PriceKind.PROMO, T0, PriceSource.PROMO),
+        (1000, PriceKind.REGULAR, T0 + timedelta(days=7), PriceSource.PROMO),
+    ]
+
+
+def test_promo_until_shows_last_day_in_athens() -> None:
+    start = datetime(2026, 11, 20, 22, 0, tzinfo=UTC)  # 21/11 00:00 Athens
+    end = datetime(2026, 11, 30, 22, 0, tzinfo=UTC)  # 01/12 00:00 Athens, exclusive
+    price = PriceState(1200, 999, start, end, promo_prior_cents=1200)
+    label = build_label_data(_product(), price, [], TemplateKey.PROMO, start)
+    assert label.promo_until_text == "30/11"
 
 
 def test_lowest_prior_price_none_when_history_too_short() -> None:

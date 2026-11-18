@@ -285,6 +285,7 @@ def upgrade() -> None:
         sa.Column("battery_pct", sa.Integer(), nullable=True),
         sa.Column("displayed_hash", sa.String(length=64), nullable=True),
         sa.Column("desired_hash", sa.String(length=64), nullable=True),
+        sa.Column("desired_hash_changed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),
@@ -455,6 +456,7 @@ def upgrade() -> None:
     # ### end Alembic commands ###
 
     op.execute("INSERT INTO store (id, name, timezone) VALUES (1, 'Pharmacy', 'Europe/Athens')")
+    op.execute("SELECT setval(pg_get_serial_sequence('store', 'id'), 1)")
     op.execute(
         """
         CREATE FUNCTION reject_change() RETURNS trigger LANGUAGE plpgsql AS $$

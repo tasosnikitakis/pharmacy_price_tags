@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from collections.abc import Iterator
 
 import pytest
@@ -12,6 +13,10 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
+
+# Throwaway secrets for the test run only, generated fresh each time.
+os.environ.setdefault("SESSION_SECRET", secrets.token_urlsafe(48))
+os.environ.setdefault("GATEWAY_TOKEN", secrets.token_urlsafe(48))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -27,7 +32,7 @@ def alembic_config(database_url: str) -> Config:
 def database_url() -> str:
     if not os.environ.get("DATABASE_URL"):
         pytest.skip("DATABASE_URL is not set")
-    return get_settings().database_url
+    return get_settings().database_url.get_secret_value()
 
 
 @pytest.fixture(scope="session")

@@ -28,7 +28,9 @@ Python 3.12 (`uv`), FastAPI, Postgres 16, SQLAlchemy 2 and Alembic, Pillow, `ble
 
 ```bash
 uv sync --all-extras
-cp .env.example .env          # then point DATABASE_URL at your Postgres 16
+cp .env.example .env
+uv run python -m core.gen_secrets >> .env   # required secrets; see docs/decisions/0010
+# for running outside Compose, also set DATABASE_URL to your own Postgres 16
 uv run alembic upgrade head
 uv run pytest
 uv run ruff check . && uv run mypy
