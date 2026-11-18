@@ -438,6 +438,28 @@ def test_prefilled_prior_is_ignored_when_revalidation_removes_the_promo() -> Non
     assert sorted(e.kind for e in change.events) == ["promo.prior_cleared", "promo.refused"]
 
 
+def test_prefilled_prior_is_ignored_when_running_promo_is_ended() -> None:
+    """Rule 1b: the admin ends the running promo by setting its end to now."""
+    start = T0 - timedelta(days=2)
+    old = PriceState(1000, 900, start, T0 + timedelta(days=5), promo_prior_cents=1200)
+    change = apply_price_change(_product(), old, PriceState(1000, 900, start, T0),
+                                [_point(1000, 10)], T0, PriceSource.MANUAL,
+                                entered_prior_cents=1200)  # fmt: skip
+    assert change.state == PriceState(1000)
+    assert [e.kind for e in change.events] == ["promo.prior_cleared"]
+
+
+def test_prefilled_prior_is_ignored_when_expired_promo_is_dropped() -> None:
+    """Rule 0: the form is submitted just after the promo ended."""
+    start, end = T0 - timedelta(days=9), T0 - timedelta(minutes=1)
+    old = PriceState(1000, 900, start, end, promo_prior_cents=1200)
+    change = apply_price_change(_product(), old, PriceState(1000, 900, start, end),
+                                [_point(1000, 10)], T0, PriceSource.MANUAL,
+                                entered_prior_cents=1200)  # fmt: skip
+    assert change.state == PriceState(1000)
+    assert [e.kind for e in change.events] == ["promo.prior_cleared"]
+
+
 def test_partial_promo_and_negative_prior_are_errors() -> None:
     with pytest.raises(ValueError):
         apply_price_change(_product(), PriceState(1000), PriceState(1000, 800), [], T0,

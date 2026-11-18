@@ -169,14 +169,15 @@ def apply_price_change(
        given, the stored ``old.promo_prior_cents`` is kept only while the promo is
        unchanged; if ``promo_cents``, ``promo_from`` or ``promo_to`` change, or the
        promo ends or is removed by any rule here (0, 1 or 3), it is cleared and
-       ``promo.prior_cleared`` is logged. ``entered_prior_cents`` raises
-       ``ValueError`` only when ``requested`` itself has no promo, or when it is
-       negative. When rule 0 or 3 removes an unchanged promo, ``entered_prior_cents``
-       is ignored: nothing is stored, no ``promo.prior_set`` is logged, and the events
-       are those of the removal (``promo.refused`` for rule 3, plus
-       ``promo.prior_cleared`` if a manual prior price was stored). An entered prior price is stored
-       even when history covers the 30-day window; ``resolve_prior_price`` then uses
-       history.
+       ``promo.prior_cleared`` is logged. ``entered_prior_cents`` is checked first:
+       a negative value always raises ``ValueError``, and so does a value when
+       ``requested`` itself has no promo (rule 1a). Otherwise, whenever ``requested``
+       has a promo but the resulting ``state`` does not (removed by rule 0, 1b or 3),
+       ``entered_prior_cents`` is ignored: nothing is stored, no ``promo.prior_set``
+       is logged, and the events are those of the removal (``promo.refused`` for rule
+       3, plus ``promo.prior_cleared`` if a manual prior price was stored). An
+       entered prior price is stored even when history covers the 30-day window;
+       ``resolve_prior_price`` then uses history.
     3. Any promo left in ``state``, running or scheduled, is re-validated with
        ``validate_promo`` against ``history`` plus the rows this change appends. This
        covers changes the request did not make to the promo itself, such as an import
