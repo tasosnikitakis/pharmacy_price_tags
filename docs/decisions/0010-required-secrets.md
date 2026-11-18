@@ -13,9 +13,13 @@ Postgres publishes no port; only the core reaches it, over the Compose network.
 
 **Outside Docker** (cloud sessions, the CI pytest job, Windows development) there is
 no secret file: a `DATABASE_URL` with the password in it is used exactly as given.
-With a secret file, only its trailing newline is removed, and SQLAlchemy URL-escapes
-the password when it renders the URL, so `@`, `/`, `:` and `%` are safe. Giving the
-password both ways is an error.
+With a secret file, the core reads it itself (`core.config.read_secret_file`) and
+removes only trailing newlines, exactly as the Postgres image does, so both always see
+the same password. A secret with any other leading or trailing whitespace (spaces,
+tabs, a `\r` from a Windows editor) is refused at startup, from a file or from the
+environment, because it is almost certainly a mistake and the two sides could disagree.
+SQLAlchemy URL-escapes the password when it renders the URL, so `@`, `/`, `:` and `%`
+are safe. Giving the password both ways is an error.
 
 **Why.** The repository is public. Any default would be a published password that a
 forgotten `.env` would silently put into production.

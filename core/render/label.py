@@ -33,7 +33,8 @@ class LabelData:
     - ``standard``: ``name``, ``price_text``
     - ``unit_price``: as standard, plus ``unit_price_text``
     - ``promo``: ``name``, ``price_text`` (the promo price), ``prior_price_text``,
-      ``promo_until_text``
+      ``promo_until_text``; plus ``unit_price_text`` (from the promo price) when the
+      product requires a unit price, drawn under the same size rule as ``unit_price``
     - ``unassigned``: ``short_code``, ``tag_model``
     """
 
