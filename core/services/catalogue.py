@@ -32,7 +32,16 @@ from core.db.models import (
     Product,
 )
 from core.domain import pricing
-from core.domain.catalogue import CatalogueEntry, DiffEntry, ImportDiff, build_diff
+from core.domain.catalogue import (
+    BRAND_MAX_LEN,
+    NAME_MAX_LEN,
+    PRICE_CENTS_MAX,
+    CatalogueEntry,
+    DiffEntry,
+    ImportDiff,
+    build_diff,
+    normalise_text,
+)
 from core.domain.pricing import PriceChange, PriceEvent
 from core.domain.types import (
     PackUnit,
@@ -46,6 +55,9 @@ from core.importers.profile import ImportSettings, ParsedImport, parse_import
 
 #: ``event_log.actor`` for writes no person made.
 SYSTEM_ACTOR = "system"
+#: Column lengths of ``import_profile.name`` and ``import_run.filename``.
+PROFILE_NAME_MAX_LEN = 100
+FILENAME_MAX_LEN = 255
 
 
 class NotFound(LookupError):
@@ -175,6 +187,8 @@ def save_profile(
     name = name.strip()
     if not name:
         raise ValueError("profile name is empty")
+    if len(name) > PROFILE_NAME_MAX_LEN:
+        raise ValueError(f"profile name is longer than {PROFILE_NAME_MAX_LEN} characters")
     profile = get_profile(session, name, store_id)
     if profile is None:
         profile = ImportProfile(store_id=store_id, name=name)
@@ -282,10 +296,10 @@ def _store_change(
     return price, points
 
 
-def _lock_price(session: Session, product_id: int) -> Price | None:
+def _lock_price(session: Session, product_id: int, store_id: int) -> Price | None:
     return session.scalar(
         select(Price)
-        .where(Price.product_id == product_id)
+        .where(Price.product_id == product_id, Price.store_id == store_id)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
@@ -326,6 +340,11 @@ class ImportResult:
     price_events: list[PriceEvent]
 
 
+def _check_filename(filename: str) -> None:
+    if len(filename) > FILENAME_MAX_LEN:
+        raise ValueError(f"file name is longer than {FILENAME_MAX_LEN} characters")
+
+
 def _parse(data: bytes, profile: ImportProfile) -> ParsedImport:
     return parse_import(data, profile_settings(profile))
 
@@ -338,6 +357,7 @@ def preview_import(
 ) -> ImportPreview:
     """Parse ``data`` with ``profile`` and diff it against the catalogue (section 6,
     step 3). Raises ``ImportFormatError`` if the file as a whole cannot be read."""
+    _check_filename(filename)
     parsed = _parse(data, profile)
     diff = build_diff(parsed.rows, parsed.rejected, catalogue_entries(session, profile.store_id))
     return ImportPreview(filename, profile.name, parsed.encoding, parsed.delimiter, diff)
@@ -359,10 +379,12 @@ def apply_import(
     reflects the catalogue at the moment of writing. New products are created; changed
     prices go through ``apply_price_change`` with source ``import`` and the stored
     promo passed through unchanged; changed product fields go through
-    ``apply_product_change``. Unchanged rows write nothing, so re-importing a file
+    ``apply_product_change`` and are logged per product as ``product.edited`` with the
+    import run id. Unchanged rows write nothing, so re-importing a file
     adds no history. The manual-change flag is cleared on every product in the file.
     Records an ``import_run`` with counts and an ``import.applied`` event.
     """
+    _check_filename(filename)
     now = _check_now(now)
     store_id = profile.store_id
     parsed = _parse(data, profile)
@@ -511,6 +533,19 @@ def _import_changed(
             )  # fmt: skip
             history = [*history, *points]
             events += product_change.events
+        _log(
+            session,
+            "product.edited",
+            {
+                "product_id": product.id,
+                "ean": product.ean,
+                "changes": {c.field: [c.old, c.new] for c in entry.field_changes},
+                "import_run_id": run.id,
+            },
+            actor,
+            now,
+            product.store_id,
+        )
     if price is None or price.regular_cents != row.regular_cents:
         old = price_state(price) if price is not None else None
         # Pass the stored promo through unchanged; leaving it out would end it.
@@ -550,9 +585,11 @@ def edit_price(
         raise TypeError("regular_cents must be an integer number of cents")
     if regular_cents < 0:
         raise ValueError("regular_cents must not be negative")
+    if regular_cents > PRICE_CENTS_MAX:
+        raise ValueError(f"regular_cents must be at most {PRICE_CENTS_MAX}")
     now = _check_now(now)
     with session.begin_nested():
-        price = _lock_price(session, product_id)
+        price = _lock_price(session, product_id, store_id)
         product = _lock_product(session, product_id, store_id)
         old = price_state(price) if price is not None else None
         if old is not None and old.regular_cents == regular_cents:
@@ -610,10 +647,19 @@ class ProductFields:
             active=product.active,
         )
 
+    def normalised(self) -> ProductFields:
+        """Name and brand cleaned like an import cell; an empty brand becomes ``None``."""
+        brand = normalise_text(self.brand) if self.brand is not None else None
+        return dataclasses.replace(self, name=normalise_text(self.name), brand=brand or None)
+
     def check(self) -> None:
         """Raise ``ValueError`` for values the database would refuse."""
         if not self.name.strip():
             raise ValueError("name is empty")
+        if len(self.name) > NAME_MAX_LEN:
+            raise ValueError(f"name is longer than {NAME_MAX_LEN} characters")
+        if self.brand is not None and len(self.brand) > BRAND_MAX_LEN:
+            raise ValueError(f"brand is longer than {BRAND_MAX_LEN} characters")
         if self.pack_qty_milli is not None and self.pack_qty_milli <= 0:
             raise ValueError("pack size must be positive")
         if self.unit_price_required and (self.pack_qty_milli is None or self.pack_unit is None):
@@ -642,20 +688,23 @@ def edit_product(
     Calls ``apply_product_change`` in the same transaction as the product update and
     stores its result; setting ``is_rx`` thereby ends any active or scheduled promo
     and writes a history row. Logs ``product.edited`` with each changed field's old and
-    new value. Returns the price change, or ``None`` if the price is unaffected; an
-    edit that changes nothing writes nothing.
+    new value. Name and brand are normalised as in an import (``normalise_text``; an
+    empty brand is stored as ``None``) before comparing, so an edit that changes
+    nothing, or only whitespace, writes nothing. Returns the price change, or ``None``
+    if the price is unaffected.
     """
+    fields = fields.normalised()
     fields.check()
     now = _check_now(now)
     with session.begin_nested():
-        price = _lock_price(session, product_id)
+        price = _lock_price(session, product_id, store_id)
         product = _lock_product(session, product_id, store_id)
         old_fields = ProductFields.of(product)
         changed = _changed_fields(old_fields, fields)
         if not changed:
             return None
         old_facts = product_facts(product)
-        product.name = fields.name.strip()
+        product.name = fields.name
         product.brand = fields.brand
         product.pack_qty_milli = fields.pack_qty_milli
         product.pack_unit = fields.pack_unit.value if fields.pack_unit else None

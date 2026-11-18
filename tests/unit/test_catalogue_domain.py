@@ -39,7 +39,6 @@ NOW = datetime(2026, 11, 18, 10, 0, tzinfo=UTC)
         ("12,9", 1290),
         ("12", 1200),
         ("0,05", 5),
-        ("0", 0),
         ("12.90", 1290),
         (" 12,90 ", 1290),
         ("12,90 €", 1290),
@@ -68,6 +67,9 @@ def test_parse_price_cents(text: str, cents: int) -> None:
         ("12,90,1", "not a number"),
         ("-1,50", "negative"),
         ("-0", "negative"),
+        ("0", "zero price, probably no price in the ERP"),
+        ("0,00", "zero price"),
+        ("0.00 €", "zero price"),
         ("12,905", "more than 2 decimals"),
         ("1.290", "ambiguous"),
         ("12,", "not a number"),
@@ -85,7 +87,7 @@ def test_parse_price_rejects(text: str, reason: str) -> None:
 
 def test_parse_price_never_uses_float() -> None:
     # 0.1 + 0.2 style errors cannot appear: every two-decimal value maps exactly.
-    for cents in range(0, 100_000, 7):
+    for cents in range(1, 100_000, 7):
         text = f"{cents // 100},{cents % 100:02d}"
         assert parse_price_cents(text) == cents
 
@@ -207,6 +209,7 @@ def test_parse_row_optional_cells_absent_or_empty() -> None:
         ({"name": "  "}, "name is empty", "2000000000015"),
         ({"price": "αβγ"}, "price is not a number", "2000000000015"),
         ({"price": "-5,00"}, "price is negative", "2000000000015"),
+        ({"price": "0,00"}, "zero price, probably no price in the ERP", "2000000000015"),
         ({"price": ""}, "price is empty", "2000000000015"),
         ({"pack_qty": "0", "pack_unit": "g"}, "positive", "2000000000015"),
         ({"name": "Χ" * 301}, "longer than 300", "2000000000015"),

@@ -8,6 +8,7 @@ names in the ERP's export, e.g. ``{"ean": "Barcode", "name": "Περιγραφή
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -108,21 +109,53 @@ def column_positions(table: Table, settings: ImportSettings) -> dict[Column, int
     return {column: positions[_key(h)] for column, h in settings.mapping.items()}
 
 
+_BARE_INTEGER = re.compile(r"^\d+$")
+_ONE_OR_TWO_DIGITS = re.compile(r"^\d{1,2}$")
+
+
+def _split_decimal_comma(cells: list[str], price_index: int) -> bool:
+    """True when the price cell is a bare integer and the next cell has 1 or 2 digits,
+    the trace an unquoted ``12,90`` leaves in a ``,``-delimited row."""
+    if price_index + 1 >= len(cells):
+        return False
+    price, after = cells[price_index].strip(), cells[price_index + 1].strip()
+    return bool(_BARE_INTEGER.match(price) and _ONE_OR_TWO_DIGITS.match(after))
+
+
 def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
     """Read file bytes with a profile into accepted and rejected rows.
 
     Raises ``ImportFormatError`` when the file as a whole cannot be read (encoding,
     no header, mapped columns absent). Problems with single rows never raise: those
     rows are rejected with a reason, including every row of a duplicate EAN.
+
+    In a ``,``-delimited file an unquoted decimal comma silently shifts columns, so
+    there a row is also rejected when its cell count differs from the header's, or
+    when the price cell is a bare integer followed by a cell of 1 or 2 digits.
     """
     table = read_table(data, settings.encoding, settings.delimiter)
     positions = column_positions(table, settings)
     width = len(table.header)
+    comma = table.delimiter == ","
+    price_index = positions[Column.PRICE]
     parsed: list[ImportRow | RejectedRow] = []
     for line, cells in table.rows:
-        if len(cells) > width and any(c.strip() for c in cells[width:]):
+        # With ',' an unquoted decimal comma ("12,90") splits the price into two cells
+        # and shifts every column after it, so any width mismatch is suspect.
+        too_long = len(cells) > width and any(c.strip() for c in cells[width:])
+        if too_long or (comma and len(cells) != width):
             parsed.append(
                 RejectedRow(line, f"row has {len(cells)} cells but the header has {width}")
+            )
+            continue
+        if comma and _split_decimal_comma(cells, price_index):
+            parsed.append(
+                RejectedRow(
+                    line,
+                    "price looks like an unquoted decimal comma "
+                    f"({cells[price_index].strip()},{cells[price_index + 1].strip()}); "
+                    'quote prices in comma-delimited files ("12,90")',
+                )
             )
             continue
         values = {

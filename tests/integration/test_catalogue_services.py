@@ -26,7 +26,8 @@ from sqlalchemy.orm import Session
 
 from core.db.models import EventLog, ImportProfile, ImportRun, Price, PriceHistory, Product
 from core.domain import pricing
-from core.domain.pricing import NewPricePoint, PriceChange, PriceEvent
+from core.domain.catalogue import PRICE_CENTS_MAX
+from core.domain.pricing import NewPricePoint, PriceChange, PriceEvent, PromoRefusal
 from core.domain.types import (
     PackUnit,
     PriceKind,
@@ -137,6 +138,9 @@ class FakePricing:
     price_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     product_calls: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     fail_on_call: int | None = None
+    # Behave like B removing a promo that a new regular price makes unlawful: the
+    # returned state has no promo even though ``requested`` carried it through.
+    refuse_promo: bool = False
 
     def apply_price_change(
         self,
@@ -154,6 +158,22 @@ class FakePricing:
         )  # fmt: skip
         if self.fail_on_call == len(self.price_calls):
             raise RuntimeError("injected failure")
+        if self.refuse_promo and requested.promo_cents is not None:
+            return PriceChange(
+                state=PriceState(regular_cents=requested.regular_cents),
+                history_rows=[
+                    NewPricePoint(requested.regular_cents, PriceKind.REGULAR, now, source)
+                ],
+                events=[
+                    PriceEvent(
+                        "promo.refused",
+                        {
+                            "product_id": product.product_id,
+                            "reason": PromoRefusal.NOT_BELOW_REGULAR,
+                        },
+                    )
+                ],
+            )
         kept_prior = old.promo_prior_cents if old is not None else None
         return PriceChange(
             state=dataclasses.replace(requested, promo_prior_cents=kept_prior),
@@ -383,6 +403,57 @@ def test_import_field_changes_use_apply_product_change(
     # The price is unchanged, so no price write and no history row.
     assert len(_history(db, hand.id)) == 1
     assert all(c["product"].product_id != hand.id for c in fake.price_calls)
+    # Field changes from an import are audited per product.
+    (edited,) = _events(db, "product.edited")
+    run_id = db.scalar(select(ImportRun.id))
+    assert (edited.actor, edited.at) == (ACTOR, NOW)
+    assert edited.payload == {
+        "product_id": hand.id,
+        "ean": "2000000000015",
+        "import_run_id": run_id,
+        "changes": {
+            "name": ["ΚΡΕΜΑ ΧΕΡΙΩΝ", "ΆΛΟΗ ΚΡΕΜΑ ΧΕΡΙΩΝ"],
+            "brand": [None, "Δοκιμή Α.Ε."],
+            "pack_qty_milli": [None, 75_000],
+            "pack_unit": [None, "ml"],
+        },
+    }
+
+
+def test_import_stores_returned_state_not_requested(
+    db: Session, profile: ImportProfile, fake: FakePricing
+) -> None:
+    fake.refuse_promo = True
+    promo: dict[str, Any] = dict(
+        promo_cents=820, promo_from=NOW - timedelta(days=1), promo_to=NOW + timedelta(days=9),
+    )  # fmt: skip
+    oil = _seed(db, "2000000000022", "ΈΛΑΙΟ ΣΩΜΑΤΟΣ ΉΠΙΟ", 900, **promo)
+    result = svc.apply_import(db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW)
+    call = next(c for c in fake.price_calls if c["product"].product_id == oil.id)
+    assert call["requested"].promo_cents == 820  # the import carried the promo through
+    price = db.get(Price, oil.id)
+    assert price is not None
+    assert (price.regular_cents, price.promo_cents, price.promo_from, price.promo_to) == (
+        850, None, None, None
+    )  # fmt: skip
+    assert result.run.counts["promo_refused"] == 1
+    assert [e.kind for e in result.price_events].count("promo.refused") == 1
+    (refused,) = _events(db, "promo.refused")
+    assert refused.payload == {"product_id": oil.id, "reason": "not_below_regular"}
+
+
+def test_import_validates_filename(db: Session, profile: ImportProfile) -> None:
+    long_name = "x" * 252 + ".csv"
+    with pytest.raises(ValueError, match="longer than 255"):
+        svc.preview_import(db, _synthetic(), long_name, profile)
+    with pytest.raises(ValueError, match="longer than 255"):
+        svc.apply_import(db, _synthetic(), long_name, profile, actor=ACTOR, now=NOW)
+
+
+def test_profile_name_length_is_validated(db: Session) -> None:
+    with pytest.raises(ValueError, match="longer than 100"):
+        svc.save_profile(db, "p" * 101, ImportSettings.create(MAPPING))
+    assert svc.save_profile(db, "p" * 100, ImportSettings.create(MAPPING)).name == "p" * 100
 
 
 def test_apply_import_is_one_transaction(
@@ -452,6 +523,15 @@ def test_edit_price_validates_input(db: Session) -> None:
         svc.edit_price(db, 1, 12.9, actor=ACTOR, now=NOW)  # type: ignore[arg-type]
     with pytest.raises(svc.NotFound):
         svc.edit_price(db, 999_999, 100, actor=ACTOR, now=NOW)
+    with pytest.raises(ValueError, match="at most"):
+        svc.edit_price(db, 1, PRICE_CENTS_MAX + 1, actor=ACTOR, now=NOW)
+
+
+def test_edit_price_other_store_is_not_found(db: Session, fake: FakePricing) -> None:
+    product = _seed(db, "2000000000015", "ΆΛΟΗ", 1290)
+    with pytest.raises(svc.NotFound):
+        svc.edit_price(db, product.id, 1350, actor=ACTOR, now=NOW, store_id=2)
+    assert fake.price_calls == []
 
 
 def test_edit_product_is_rx_goes_through_write_path(db: Session, fake: FakePricing) -> None:
@@ -500,9 +580,33 @@ def test_edit_product_validates(db: Session) -> None:
         dataclasses.replace(base, unit_price_required=True),
         dataclasses.replace(base, name=" "),
         dataclasses.replace(base, pack_qty_milli=0, pack_unit=PackUnit.GRAM),
+        dataclasses.replace(base, name="Χ" * 301),
+        dataclasses.replace(base, brand="Β" * 201),
     ):
         with pytest.raises(ValueError):
             svc.edit_product(db, product.id, bad, actor=ACTOR, now=NOW)
+    assert _count(db, EventLog) == 0
+
+
+def test_edit_product_normalises_like_import(db: Session, fake: FakePricing) -> None:
+    product = _seed(db, "2000000000015", "ΆΛΟΗ ΚΡΕΜΑ", 1290)
+    base = svc.ProductFields.of(product)
+    # Whitespace only, and an empty brand where there is none: nothing changes.
+    blank = dataclasses.replace(base, name="  ΆΛΟΗ   ΚΡΕΜΑ ", brand="   ")
+    assert svc.edit_product(db, product.id, blank, actor=ACTOR, now=NOW) is None
+    assert _count(db, EventLog) == 0 and fake.product_calls == []
+
+    tidy = dataclasses.replace(base, name=" ΆΛΟΗ\tΝΕΑ ", brand="  Δοκιμή  Α.Ε. ")
+    svc.edit_product(db, product.id, tidy, actor=ACTOR, now=NOW)
+    assert (product.name, product.brand) == ("ΆΛΟΗ ΝΕΑ", "Δοκιμή Α.Ε.")
+    (edited,) = _events(db, "product.edited")
+    assert edited.payload["changes"] == {
+        "name": ["ΆΛΟΗ ΚΡΕΜΑ", "ΆΛΟΗ ΝΕΑ"], "brand": [None, "Δοκιμή Α.Ε."]
+    }  # fmt: skip
+
+    cleared = dataclasses.replace(svc.ProductFields.of(product), brand=" ")
+    svc.edit_product(db, product.id, cleared, actor=ACTOR, now=NOW)
+    assert product.brand is None
 
 
 # --- End to end with the real pricing rules (waiting on workstream B) ----------------

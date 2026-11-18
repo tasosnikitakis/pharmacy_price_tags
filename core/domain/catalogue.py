@@ -79,8 +79,10 @@ def parse_price_cents(text: str) -> int:
     """Parse a VAT-inclusive retail price into integer cents, exactly.
 
     ``"12,90"`` -> 1290, ``"12,9"`` -> 1290, ``"12"`` -> 1200, ``"1.290,50"`` -> 129050,
-    ``"12,90 €"`` -> 1290. Raises ``CellError`` for an empty, unparseable or negative
-    price, or one with more than two decimals (never rounded silently).
+    ``"12,90 €"`` -> 1290. Raises ``CellError`` for an empty, unparseable, zero or
+    negative price, or one with more than two decimals (never rounded silently). A
+    zero price in an ERP export almost always means "no price set", so it is refused
+    rather than put on a shelf label.
     """
     cleaned = text.replace("€", "").replace("\u00a0", " ").strip().replace(" ", "")
     if not cleaned:
@@ -90,6 +92,8 @@ def parse_price_cents(text: str) -> int:
     cleaned = cleaned.removeprefix("+")
     whole, frac = _split_number(cleaned, 2, "price")
     cents = int(whole) * 100 + int(frac.ljust(2, "0") or "0")
+    if cents == 0:
+        raise CellError(f"zero price, probably no price in the ERP: {text.strip()!r}")
     if cents > PRICE_CENTS_MAX:
         raise CellError(f"price is too large: {text.strip()!r}")
     return cents

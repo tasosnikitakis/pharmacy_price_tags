@@ -253,3 +253,72 @@ def test_parse_row_missing_price_cell_is_rejected() -> None:
     parsed = parse_import(b"ean;name;price\n20000000;A\n", settings)
     assert parsed.rows == []
     assert parsed.rejected[0].reason == "price is empty"
+
+
+# --- Unquoted decimal commas in ','-delimited files ------------------------------------
+
+_SIMPLE = {"ean": "ean", "name": "name", "price": "price"}
+_WITH_BRAND = {**_SIMPLE, "brand": "brand"}
+
+
+def test_comma_trailing_delimiter_unquoted_decimal_is_rejected() -> None:
+    # The trailing ',' gives the header a 4th column, so "12,90" fills exactly 4 cells.
+    data = b"ean,name,price,\n2000000000015,Aloe,12,90\n"
+    parsed = parse_import(data, ImportSettings.create(_SIMPLE, delimiter=","))
+    assert parsed.rows == []
+    (rejected,) = parsed.rejected
+    assert rejected.line == 2
+    assert "looks like an unquoted decimal comma (12,90)" in rejected.reason
+
+
+def test_comma_unquoted_decimal_shifting_columns_is_rejected() -> None:
+    # "12,90" splits into price "12" and name "90", and the real name lands in brand.
+    data = b"ean,price,name,brand\n2000000000015,12,90,Aloe\n"
+    parsed = parse_import(data, ImportSettings.create(_WITH_BRAND, delimiter=","))
+    assert parsed.rows == []
+    assert "looks like an unquoted decimal comma" in parsed.rejected[0].reason
+
+
+def test_comma_rows_of_another_width_are_rejected() -> None:
+    data = (
+        b"ean,name,price,brand\n"
+        b"2000000000015,Aloe,12,90,Test\n"  # one cell too many
+        b"2000000000022,Oil,8\n"  # one cell short
+        b'2000000000039,Paste,"3,15",\n'  # right width, quoted price
+    )
+    parsed = parse_import(data, ImportSettings.create(_WITH_BRAND, delimiter=","))
+    assert [(r.line, r.reason) for r in parsed.rejected] == [
+        (2, "row has 5 cells but the header has 4"),
+        (3, "row has 3 cells but the header has 4"),
+    ]
+    assert [(r.ean, r.regular_cents) for r in parsed.rows] == [("2000000000039", 315)]
+
+
+def test_comma_unambiguous_prices_are_accepted() -> None:
+    data = (
+        b"ean,price,shelf,name\n"
+        b'2000000000015,"12,90",7,Aloe\n'  # quoted price; a small number after it is fine
+        b"2000000000022,12,A7,Oil\n"  # bare integer, but the next cell is not 1-2 digits
+        b"2000000000039,12,100,Paste\n"
+    )
+    parsed = parse_import(data, ImportSettings.create(_SIMPLE, delimiter=","))
+    assert parsed.rejected == []
+    assert [r.regular_cents for r in parsed.rows] == [1290, 1200, 1200]
+
+
+def test_semicolon_equivalents_still_import() -> None:
+    trailing = b"ean;name;price;\n2000000000015;Aloe;12,90\n2000000000022;Oil;12;90\n"
+    parsed = parse_import(trailing, ImportSettings.create(_SIMPLE, delimiter=";"))
+    assert parsed.rejected == []
+    # With ';' a decimal comma never splits a cell, so "12" then "90" are two columns.
+    assert [(r.ean, r.name, r.regular_cents) for r in parsed.rows] == [
+        ("2000000000015", "Aloe", 1290),
+        ("2000000000022", "Oil", 1200),
+    ]
+    reordered = b"ean;price;name;brand\n2000000000015;12,90;Aloe\n2000000000022;12;90;Oil\n"
+    parsed = parse_import(reordered, ImportSettings.create(_WITH_BRAND, delimiter=";"))
+    assert parsed.rejected == []
+    assert [(r.regular_cents, r.name, r.brand) for r in parsed.rows] == [
+        (1290, "Aloe", None),
+        (1200, "90", "Oil"),
+    ]
