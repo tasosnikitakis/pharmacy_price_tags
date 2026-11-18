@@ -1,5 +1,6 @@
-"""Pricing rules (workstream B). Placeholders until implemented: remove each
-``xfail`` marker as the function lands; strict xfail makes a passing test fail CI."""
+"""Pricing rules (workstream B, PLAN.md section 6 and docs/decisions/0008, 0009).
+
+The first part holds the wave-0 contract tests; the second adds edge cases."""
 
 from __future__ import annotations
 
@@ -8,6 +9,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from core.domain.pricing import (
+    PriceEvent,
+    PriorPrice,
     PromoRefusal,
     PromoRefused,
     TemplateChoice,
@@ -18,10 +21,14 @@ from core.domain.pricing import (
     choose_template,
     effective_template,
     format_price,
+    format_unit_price,
     history_rows_for_change,
     lowest_prior_price,
     next_label_change,
+    price_timeline,
+    promo_active,
     resolve_prior_price,
+    unassigned_label_data,
     unit_price,
     validate_promo,
 )
@@ -485,3 +492,348 @@ def test_promo_label_never_built_without_prior_price() -> None:
     price = PriceState(1200, 999, T0, T0 + timedelta(days=7))
     with pytest.raises(PromoRefused):
         build_label_data(_product(), price, [], TemplateKey.PROMO, T0 + timedelta(hours=1))
+
+
+# --- edge cases beyond the contract tests -------------------------------------------
+
+
+def test_format_price_refuses_negative() -> None:
+    with pytest.raises(ValueError):
+        format_price(-1)
+
+
+@pytest.mark.parametrize(
+    ("cents", "qty", "unit", "expected"),
+    [
+        (450, 200_000, PackUnit.MILLILITRE, UnitPrice(2250, UnitBasis.LITRE)),
+        (320, 20_000, PackUnit.PIECE, UnitPrice(16, UnitBasis.PIECE)),
+        (100, 3_000, PackUnit.PIECE, UnitPrice(33, UnitBasis.PIECE)),  # 33,33 -> 33
+        (100, 6_000, PackUnit.PIECE, UnitPrice(17, UnitBasis.PIECE)),  # 16,67 -> 17
+        (1, 2_000, PackUnit.PIECE, UnitPrice(1, UnitBasis.PIECE)),  # 0,5 rounds half up
+        (99999, 1, PackUnit.GRAM, UnitPrice(99_999_000_000, UnitBasis.KILOGRAM)),
+    ],
+)
+def test_unit_price_bases_and_rounding(
+    cents: int, qty: int, unit: PackUnit, expected: UnitPrice
+) -> None:
+    assert unit_price(cents, qty, unit) == expected
+
+
+@pytest.mark.parametrize("qty", [0, -1])
+def test_unit_price_needs_a_positive_pack(qty: int) -> None:
+    with pytest.raises(ValueError):
+        unit_price(100, qty, PackUnit.GRAM)
+
+
+def test_format_unit_price() -> None:
+    assert format_unit_price(UnitPrice(2250, UnitBasis.KILOGRAM)) == "22,50 €/kg"
+    assert format_unit_price(UnitPrice(81250, UnitBasis.KILOGRAM)) == "812,50 €/kg"
+    assert format_unit_price(UnitPrice(5, UnitBasis.LITRE)) == "0,05 €/l"
+    piece = format_unit_price(UnitPrice(16, UnitBasis.PIECE))
+    ok = piece == "0,16 €/τεμ."
+    assert ok, ascii(piece)
+
+
+def test_price_timeline_applies_rows_in_seq_order() -> None:
+    a = PricePoint(1, 1000, PriceKind.REGULAR, T0 - timedelta(days=10), PriceSource.IMPORT)
+    b = PricePoint(2, 800, PriceKind.PROMO, T0, PriceSource.PROMO)
+    c = PricePoint(3, 1000, PriceKind.REGULAR, T0 + timedelta(days=5), PriceSource.PROMO)
+    cancel = PricePoint(4, 1100, PriceKind.REGULAR, T0 - timedelta(days=1), PriceSource.MANUAL)
+    assert price_timeline([c, a, b]) == [
+        (a.valid_from, 1000, PriceKind.REGULAR),
+        (T0, 800, PriceKind.PROMO),
+        (c.valid_from, 1000, PriceKind.REGULAR),
+    ]
+    assert price_timeline([a, b, c, cancel]) == [
+        (a.valid_from, 1000, PriceKind.REGULAR),
+        (cancel.valid_from, 1100, PriceKind.REGULAR),
+    ]
+    same_moment = PricePoint(5, 900, PriceKind.REGULAR, a.valid_from, PriceSource.MANUAL)
+    assert price_timeline([a, same_moment]) == [(a.valid_from, 900, PriceKind.REGULAR)]
+    assert price_timeline([]) == []
+
+
+def test_lowest_prior_price_window_edges() -> None:
+    """The window is [promo_from - 30 days, promo_from): a price that ended exactly at
+    the window start does not count; one starting exactly at promo_from does not."""
+    start = T0 - timedelta(days=30)
+    history = [
+        PricePoint(1, 500, PriceKind.REGULAR, T0 - timedelta(days=40), PriceSource.IMPORT),
+        PricePoint(2, 1000, PriceKind.REGULAR, start, PriceSource.IMPORT),
+        PricePoint(3, 700, PriceKind.PROMO, T0, PriceSource.PROMO),
+    ]
+    assert lowest_prior_price(history, T0) == 1000
+    exactly_at_start = [PricePoint(1, 1000, PriceKind.REGULAR, start, PriceSource.IMPORT)]
+    assert lowest_prior_price(exactly_at_start, T0) == 1000
+    assert lowest_prior_price([], T0) is None
+
+
+def test_resolve_prior_price_prefers_history_over_manual_entry() -> None:
+    price = PriceState(1000, 800, T0, T0 + timedelta(days=7), promo_prior_cents=1500)
+    assert resolve_prior_price([_point(1000, 60)], price) == PriorPrice(1000, True)
+
+
+@pytest.mark.parametrize(
+    "price",
+    [
+        PriceState(1000, 800, T0, T0),  # empty period
+        PriceState(1000, 800, T0, T0 - timedelta(days=1)),
+        PriceState(1000),  # no promo at all
+    ],
+)
+def test_validate_promo_invalid_period(price: PriceState) -> None:
+    with pytest.raises(PromoRefused) as exc:
+        validate_promo(_product(), price, [_point(1000, 60)])
+    assert exc.value.reason is PromoRefusal.INVALID_PERIOD
+
+
+def test_validate_promo_checks_rx_first() -> None:
+    with pytest.raises(PromoRefused) as exc:
+        validate_promo(_product(is_rx=True), PriceState(1000, 1200, T0, T0), [])
+    assert exc.value.reason is PromoRefusal.RX_PRODUCT
+
+
+def test_promo_active_boundaries() -> None:
+    price = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    assert not promo_active(price, T0 - timedelta(microseconds=1))
+    assert promo_active(price, T0)
+    assert not promo_active(price, T0 + timedelta(days=7))  # promo_to is exclusive
+    assert not promo_active(PriceState(1000), T0)
+
+
+def test_next_label_change_after_the_promo() -> None:
+    price = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    assert next_label_change(price, T0 + timedelta(days=7)) is None
+
+
+def test_choose_template() -> None:
+    week = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    unit = _product(unit_price_required=True)
+    assert choose_template(_product(), week, T0) is TemplateKey.PROMO
+    assert choose_template(_product(), week, T0 - timedelta(days=1)) is TemplateKey.STANDARD
+    assert choose_template(unit, PriceState(1000), T0) is TemplateKey.UNIT_PRICE
+    assert choose_template(_product(is_rx=True, unit_price_required=True), week, T0) is (
+        TemplateKey.UNIT_PRICE
+    )
+
+
+def test_effective_template_cases() -> None:
+    week = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    history = [_point(1000, 60)]
+    unit = _product(unit_price_required=True)
+    during, before = T0 + timedelta(hours=1), T0 - timedelta(days=1)
+    assert effective_template(TemplateKey.STANDARD, _product(), week, history, during) == (
+        TemplateChoice(TemplateKey.PROMO)
+    )
+    assert effective_template(TemplateKey.PROMO, unit, week, history, before) == (
+        TemplateChoice(TemplateKey.UNIT_PRICE)
+    )
+    assert effective_template(TemplateKey.STANDARD, unit, week, history, before) == (
+        TemplateChoice(TemplateKey.UNIT_PRICE)
+    )
+    assert effective_template(TemplateKey.STANDARD, _product(), week, history, before) == (
+        TemplateChoice(TemplateKey.STANDARD)
+    )
+    assert effective_template(TemplateKey.PROMO, _product(is_rx=True), week, history, during) == (
+        TemplateChoice(TemplateKey.STANDARD, PromoRefusal.RX_PRODUCT)
+    )
+    assert effective_template(TemplateKey.PROMO, _product(), week, [], during) == (
+        TemplateChoice(TemplateKey.STANDARD, PromoRefusal.NO_PRIOR_PRICE)
+    )
+
+
+def test_history_rows_for_active_and_plain_prices() -> None:
+    running = PriceState(1000, 800, T0 - timedelta(days=1), T0 + timedelta(days=2))
+    rows = history_rows_for_change(running, T0, PriceSource.IMPORT)
+    assert [(r.effective_cents, r.kind, r.valid_from, r.source) for r in rows] == [
+        (800, PriceKind.PROMO, T0, PriceSource.IMPORT),
+        (1000, PriceKind.REGULAR, T0 + timedelta(days=2), PriceSource.PROMO),
+    ]
+    starts_now = PriceState(1000, 800, T0, T0 + timedelta(days=2))
+    assert [r.kind for r in history_rows_for_change(starts_now, T0, PriceSource.MANUAL)] == [
+        PriceKind.PROMO,
+        PriceKind.REGULAR,
+    ]
+    plain = history_rows_for_change(PriceState(1200), T0, PriceSource.IMPORT)
+    assert [(r.effective_cents, r.kind, r.valid_from) for r in plain] == [
+        (1200, PriceKind.REGULAR, T0)
+    ]
+
+
+def test_new_scheduled_promo_is_accepted_with_its_rows() -> None:
+    start, end = T0 + timedelta(days=2), T0 + timedelta(days=9)
+    change = apply_price_change(_product(), PriceState(1000), PriceState(1000, 800, start, end),
+                                [_point(1000, 60)], T0, PriceSource.MANUAL)  # fmt: skip
+    assert change.state == PriceState(1000, 800, start, end)
+    assert [(r.effective_cents, r.kind, r.valid_from) for r in change.history_rows] == [
+        (1000, PriceKind.REGULAR, T0),
+        (800, PriceKind.PROMO, start),
+        (1000, PriceKind.REGULAR, end),
+    ]
+    assert change.events == []
+
+
+def test_first_price_of_a_new_product() -> None:
+    change = apply_price_change(_product(), None, PriceState(1290), [], T0, PriceSource.IMPORT)
+    assert change.state == PriceState(1290)
+    assert [(r.effective_cents, r.source) for r in change.history_rows] == [
+        (1290, PriceSource.IMPORT)
+    ]
+    assert change.events == []
+
+
+def test_new_promo_without_prior_price_is_refused_and_entered_prior_rescues_it() -> None:
+    requested = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    with pytest.raises(PromoRefused) as exc:
+        apply_price_change(_product(), PriceState(1000), requested, [_point(1000, 10)], T0,
+                           PriceSource.MANUAL)  # fmt: skip
+    assert exc.value.reason is PromoRefusal.NO_PRIOR_PRICE
+    change = apply_price_change(_product(), PriceState(1000), requested, [_point(1000, 10)], T0,
+                                PriceSource.MANUAL, entered_prior_cents=1100)  # fmt: skip
+    assert change.state.promo_prior_cents == 1100
+    assert change.events == [
+        PriceEvent(
+            "promo.prior_set",
+            {
+                "product_id": 1,
+                "prior_cents": 1100,
+                "promo_cents": 800,
+                "promo_from": T0.isoformat(),
+                "promo_to": (T0 + timedelta(days=7)).isoformat(),
+            },
+        )
+    ]
+
+
+def test_rx_product_cannot_get_a_promo() -> None:
+    requested = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    with pytest.raises(PromoRefused) as exc:
+        apply_price_change(_product(is_rx=True), PriceState(1000), requested, [_point(1000, 60)],
+                           T0, PriceSource.MANUAL)  # fmt: skip
+    assert exc.value.reason is PromoRefusal.RX_PRODUCT
+
+
+def test_unchanged_promo_keeps_its_stored_manual_prior() -> None:
+    week = T0 + timedelta(days=7)
+    old = PriceState(1200, 999, T0, week, promo_prior_cents=1300)
+    change = apply_price_change(_product(), old, PriceState(1100, 999, T0, week),
+                                [_point(1200, 10)], T0, PriceSource.IMPORT)  # fmt: skip
+    assert change.state == PriceState(1100, 999, T0, week, promo_prior_cents=1300)
+    assert change.events == []
+
+
+def test_changed_promo_with_history_logs_the_cleared_manual_prior() -> None:
+    start, end = T0 + timedelta(days=1), T0 + timedelta(days=8)
+    old = PriceState(1000, 900, start, end, promo_prior_cents=1200)
+    change = apply_price_change(_product(), old, PriceState(1000, 850, start, end),
+                                [_point(1000, 60)], T0, PriceSource.MANUAL)  # fmt: skip
+    assert change.state == PriceState(1000, 850, start, end)
+    assert [e.kind for e in change.events] == ["promo.prior_cleared"]
+
+
+def test_requested_prior_field_is_ignored_as_input() -> None:
+    requested = PriceState(1000, 800, T0, T0 + timedelta(days=7), promo_prior_cents=5000)
+    change = apply_price_change(_product(), PriceState(1000), requested, [_point(1000, 60)], T0,
+                                PriceSource.MANUAL)  # fmt: skip
+    assert change.state.promo_prior_cents is None
+
+
+def test_unchanged_scheduled_promo_survives_a_harmless_import() -> None:
+    start, end = T0 + timedelta(days=3), T0 + timedelta(days=10)
+    old = PriceState(1000, 800, start, end)
+    change = apply_price_change(_product(), old, PriceState(1050, 800, start, end),
+                                [_point(1000, 60)], T0, PriceSource.IMPORT)  # fmt: skip
+    assert change.state == PriceState(1050, 800, start, end)
+    assert [r.kind for r in change.history_rows] == [
+        PriceKind.REGULAR, PriceKind.PROMO, PriceKind.REGULAR,
+    ]  # fmt: skip
+
+
+def test_cancelled_scheduled_promo_rows_never_lower_a_prior_price() -> None:
+    """A promo of 5,00 was scheduled for day 1..3 and its rows written; it was then
+    cancelled on day 0 by a write. A new promo from day 10 must not see 5,00."""
+    history = [
+        _point(1000, 60),
+        PricePoint(next(_seq), 500, PriceKind.PROMO, T0 + timedelta(days=1), PriceSource.PROMO),
+        PricePoint(next(_seq), 1000, PriceKind.REGULAR, T0 + timedelta(days=3), PriceSource.PROMO),
+        PricePoint(next(_seq), 1000, PriceKind.REGULAR, T0, PriceSource.MANUAL),  # cancel
+    ]
+    start = T0 + timedelta(days=10)
+    assert lowest_prior_price(history, start) == 1000
+    change = apply_price_change(_product(), PriceState(1000),
+                                PriceState(1000, 900, start, start + timedelta(days=7)), history,
+                                T0 + timedelta(hours=1), PriceSource.MANUAL)  # fmt: skip
+    assert change.state.promo_cents == 900
+
+
+def test_naive_datetimes_are_refused() -> None:
+    with pytest.raises(ValueError):
+        apply_price_change(_product(), None, PriceState(1000), [], datetime(2026, 12, 1),  # noqa: DTZ001
+                           PriceSource.IMPORT)  # fmt: skip
+
+
+def test_negative_prices_are_refused() -> None:
+    with pytest.raises(ValueError):
+        apply_price_change(_product(), None, PriceState(-1), [], T0, PriceSource.IMPORT)
+
+
+def test_apply_product_change_returns_none_without_price_consequence() -> None:
+    week = PriceState(1000, 800, T0 - timedelta(days=1), T0 + timedelta(days=7))
+    expired = PriceState(1000, 800, T0 - timedelta(days=9), T0 - timedelta(days=2))
+    rx = _product(is_rx=True)
+    assert apply_product_change(_product(), _product(name="Άλλο"), week, [], T0) is None
+    assert apply_product_change(_product(), rx, PriceState(1000), [], T0) is None
+    assert apply_product_change(_product(), rx, None, [], T0) is None
+    assert apply_product_change(_product(), rx, expired, [], T0) is None
+
+
+def test_setting_rx_ends_scheduled_promo_and_clears_manual_prior() -> None:
+    start = T0 + timedelta(days=2)
+    price = PriceState(1000, 800, start, start + timedelta(days=7), promo_prior_cents=1100)
+    change = apply_product_change(_product(), _product(is_rx=True), price, [], T0)
+    assert change is not None
+    assert change.state == PriceState(1000)
+    assert [(r.effective_cents, r.kind, r.valid_from, r.source) for r in change.history_rows] == [
+        (1000, PriceKind.REGULAR, T0, PriceSource.MANUAL)
+    ]
+    assert [e.kind for e in change.events] == ["promo.ended_rx", "promo.prior_cleared"]
+
+
+def test_build_label_data_regular_templates() -> None:
+    product = _product(unit_price_required=True, pack_qty_milli=200_000, pack_unit=PackUnit.GRAM)
+    price = PriceState(450)
+    standard = build_label_data(product, price, [], TemplateKey.STANDARD, T0)
+    assert (standard.template, standard.price_text, standard.unit_price_text) == (
+        TemplateKey.STANDARD, "4,50 €", None,
+    )  # fmt: skip
+    unit = build_label_data(product, price, [], TemplateKey.UNIT_PRICE, T0)
+    assert (unit.price_text, unit.unit_price_text) == ("4,50 €", "22,50 €/kg")
+    same_name = unit.name == product.name and unit.brand == product.brand
+    assert same_name
+
+
+def test_build_label_data_promo_fields() -> None:
+    price = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    label = build_label_data(_product(), price, [_point(1000, 60)], TemplateKey.PROMO, T0)
+    assert (label.price_text, label.prior_price_text, label.unit_price_text) == (
+        "8,00 €", "10,00 €", None,
+    )  # fmt: skip
+    assert label.promo_until_text == "08/12"  # T0 + 7 days is 08/12 10:00 Athens, exclusive
+
+
+def test_build_label_data_errors() -> None:
+    no_pack = _product(pack_qty_milli=None, pack_unit=None)
+    with pytest.raises(ValueError):
+        build_label_data(no_pack, PriceState(100), [], TemplateKey.UNIT_PRICE, T0)
+    with pytest.raises(ValueError):
+        build_label_data(_product(), PriceState(100), [], TemplateKey.UNASSIGNED, T0)
+    rx_promo = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    with pytest.raises(PromoRefused):
+        build_label_data(_product(is_rx=True), rx_promo, [_point(1000, 60)], TemplateKey.PROMO, T0)
+
+
+def test_unassigned_label_data() -> None:
+    label = unassigned_label_data("A7K3", "gicisky 2.9")
+    assert (label.template, label.short_code, label.tag_model) == (
+        TemplateKey.UNASSIGNED, "A7K3", "gicisky 2.9",
+    )  # fmt: skip
