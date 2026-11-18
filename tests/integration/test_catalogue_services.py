@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from core.db.models import EventLog, ImportProfile, ImportRun, Price, PriceHistory, Product
 from core.domain import pricing
-from core.domain.catalogue import PRICE_CENTS_MAX
+from core.domain.catalogue import PRICE_CENTS_MAX, JumpThresholds
 from core.domain.pricing import NewPricePoint, PriceChange, PriceEvent, PromoRefusal
 from core.domain.types import (
     PackUnit,
@@ -237,7 +237,7 @@ def test_preview_empty_catalogue_lists_new_and_rejected(
     assert (preview.filename, preview.profile_name) == ("export.csv", "synthetic")
     assert preview.diff.counts() == {
         "new": 9, "changed": 0, "unchanged": 0, "rejected": 4, "missing": 0,
-        "price_changed": 0, "manually_changed": 0,
+        "price_changed": 0, "manually_changed": 0, "price_jumps": 0,
     }  # fmt: skip
     assert [r.line for r in preview.diff.rejected] == [10, 11, 12, 13]
     assert _count(db, Product) == 0 and _count(db, ImportRun) == 0  # nothing written
@@ -685,3 +685,105 @@ def test_setting_is_rx_ends_promo_end_to_end(db: Session) -> None:
     assert {e.kind for e in _events(db)} >= {"promo.ended_rx", "product.edited"}
     last = _history(db, product.id)[-1]
     assert (last.kind, last.source, last.valid_from) == ("regular", "manual", NOW)
+
+
+# --- Price-jump warning (real pricing rules) ------------------------------------------
+
+
+def _seed_for_jumps(db: Session) -> dict[str, Product]:
+    """Four price changes against the synthetic file, two of them over 50%."""
+    return {
+        "aloe": _seed(db, "2000000000015", "ΆΛΟΗ ΚΡΕΜΑ ΧΕΡΙΩΝ", 500),  # -> 1290, +158%
+        "oil": _seed(db, "2000000000022", "ΈΛΑΙΟ ΣΩΜΑΤΟΣ ΉΠΙΟ", 800),  # -> 850, +6%
+        "shampoo": _seed(db, "2000000000039", "ΣΑΜΠΟΥΑΝ", 2000),  # -> 640, -68%
+        "vitamins": _seed(db, "2000000000046", "ΒΙΤΑΜΙΝΕΣ", 1490),  # -> 1500, +1%
+    }
+
+
+def test_preview_lists_price_jumps(db: Session, profile: ImportProfile) -> None:
+    _seed_for_jumps(db)
+    diff = svc.preview_import(db, _synthetic(), "export.csv", profile).diff
+    assert [
+        (j.ean, j.name, j.old_cents, j.new_cents, j.percent_change) for j in diff.price_jumps
+    ] == [
+        ("2000000000015", "ΆΛΟΗ ΚΡΕΜΑ ΧΕΡΙΩΝ", 500, 1290, 158),
+        ("2000000000039", "ΊΡΙΣ ΣΑΜΠΟΥΑΝ ΌΛΟΙ ΟΙ ΤΥΠΟΙ", 2000, 640, -68),
+    ]
+    assert diff.suspicious is True  # 2 of 4 price changes = 50% > 20%
+    assert diff.jump_thresholds == JumpThresholds(50, 20)
+    relaxed = svc.preview_import(
+        db, _synthetic(), "export.csv", profile, JumpThresholds(warn_percent=50, banner_percent=50)
+    ).diff
+    assert (len(relaxed.price_jumps), relaxed.suspicious) == (2, False)  # 50% is not > 50%
+
+
+def test_apply_refuses_price_jumps_without_confirmation(
+    db: Session, profile: ImportProfile
+) -> None:
+    seeded = _seed_for_jumps(db)
+    with pytest.raises(svc.ImportConfirmationRequired, match="2 of 4 price changes") as err:
+        svc.apply_import(db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW)
+    assert [j.ean for j in err.value.jumps] == ["2000000000015", "2000000000039"]
+    assert isinstance(err.value, ValueError)
+    # Nothing was written.
+    assert _count(db, ImportRun) == 0 and _count(db, EventLog) == 0
+    assert _count(db, Product) == 4
+    price = db.get(Price, seeded["aloe"].id)
+    assert price is not None and price.regular_cents == 500
+
+
+def test_apply_with_confirmed_price_jumps(db: Session, profile: ImportProfile) -> None:
+    seeded = _seed_for_jumps(db)
+    result = svc.apply_import(
+        db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW, confirm_price_jumps=True
+    )
+    # The jumping rows are applied like any other.
+    for key, cents in (("aloe", 1290), ("shampoo", 640), ("oil", 850)):
+        price = db.get(Price, seeded[key].id)
+        assert price is not None and price.regular_cents == cents
+    assert result.run.counts["price_jumps"] == 2
+    applied = _events(db, "import.applied")[0].payload
+    assert applied["price_jumps"] == 2
+    assert applied["price_jumps_suspicious"] is True
+    assert applied["price_jumps_confirmed"] is True
+    assert applied["jump_thresholds"] == {"warn_percent": 50, "banner_percent": 20}
+
+
+def test_apply_without_banner_needs_no_confirmation(db: Session, profile: ImportProfile) -> None:
+    _seed(db, "2000000000015", "ΆΛΟΗ ΚΡΕΜΑ ΧΕΡΙΩΝ", 500)  # one jump among six changes
+    others = (
+        ("2000000000022", 800),
+        ("2000000000039", 600),
+        ("2000000000046", 1400),
+        ("2000000000053", 400),
+        ("2000000000060", 380),
+    )
+    for ean, cents in others:
+        _seed(db, ean, "Π", cents)
+    diff = svc.preview_import(db, _synthetic(), "export.csv", profile).diff
+    assert (len(diff.price_jumps), diff.suspicious) == (1, False)  # 1 of 6 = 17%
+    svc.apply_import(db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW)
+    applied = _events(db, "import.applied")[0].payload
+    assert (applied["price_jumps"], applied["price_jumps_suspicious"]) == (1, False)
+    assert applied["price_jumps_confirmed"] is False
+
+
+def test_apply_uses_custom_thresholds(db: Session, profile: ImportProfile) -> None:
+    _seed_for_jumps(db)
+    strict = JumpThresholds(warn_percent=7, banner_percent=50)  # 2 of 4 jump: 50%, no banner
+    result = svc.apply_import(
+        db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW, thresholds=strict
+    )
+    assert result.run.counts["price_jumps"] == 2
+    applied = _events(db, "import.applied")[0].payload
+    assert applied["jump_thresholds"] == {"warn_percent": 7, "banner_percent": 50}
+    assert applied["price_jumps_suspicious"] is False
+
+
+def test_apply_refuses_with_custom_thresholds(db: Session, profile: ImportProfile) -> None:
+    _seed_for_jumps(db)
+    strict = JumpThresholds(warn_percent=7, banner_percent=49)  # 2 of 4 = 50% > 49%
+    with pytest.raises(svc.ImportConfirmationRequired, match="2 of 4 price changes are over 7%"):
+        svc.apply_import(
+            db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW, thresholds=strict
+        )

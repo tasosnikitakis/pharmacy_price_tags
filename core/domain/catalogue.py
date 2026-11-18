@@ -16,6 +16,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
+from fractions import Fraction
 
 from core.domain.types import PackUnit
 
@@ -377,12 +378,88 @@ class MissingProduct:
 
 
 @dataclass(frozen=True, slots=True)
+class JumpThresholds:
+    """When the import preview warns about a price change (Tasos).
+
+    ``warn_percent``: a price change of more than this percent, either way, warns.
+    ``banner_percent``: when more than this percent of the price changes warn, the
+    file probably has a wrong column or is the wrong file, so the preview shows a
+    banner and applying needs an extra confirmation. Whole percents only; the
+    defaults match ``core.config.Settings``.
+    """
+
+    warn_percent: int = 50
+    banner_percent: int = 20
+
+    def __post_init__(self) -> None:
+        for name in ("warn_percent", "banner_percent"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be a whole number of percent")
+        if self.warn_percent <= 0:
+            raise ValueError("warn_percent must be above 0")
+        if not 1 <= self.banner_percent <= 100:
+            raise ValueError("banner_percent must be from 1 to 100")
+
+
+@dataclass(frozen=True, slots=True)
+class PriceJump:
+    """A price change larger than ``JumpThresholds.warn_percent``. It only warns;
+    the row is still applied."""
+
+    ean: str
+    name: str
+    old_cents: int
+    new_cents: int
+    # Signed whole percent, rounded half away from zero (1000 -> 1501 is +50, 1000 ->
+    # 499 is -50, both above 50% exactly). None when the old price was zero.
+    percent_change: int | None
+
+
+def price_jumps(
+    price_changes: Iterable[tuple[str, str, int, int]], warn_percent: int
+) -> list[PriceJump]:
+    """The ``(ean, name, old_cents, new_cents)`` changes that jump, largest first.
+
+    A change jumps when ``abs(new - old) * 100 > old * warn_percent``: strict, so a
+    change of exactly ``warn_percent`` does not warn. Integers only. Sorted by the
+    exact relative size of the change (from a zero price first), then by EAN.
+    """
+    jumps: list[tuple[tuple[int, Fraction], PriceJump]] = []
+    for ean, name, old, new in price_changes:
+        delta = abs(new - old)
+        if delta * 100 <= old * warn_percent:
+            continue
+        if old == 0:
+            jumps.append(((0, Fraction(0)), PriceJump(ean, name, old, new, None)))
+            continue
+        whole, remainder = divmod(delta * 100, old)
+        rounded = whole + (1 if 2 * remainder >= old else 0)
+        percent = rounded if new > old else -rounded
+        jumps.append(((1, -Fraction(delta, old)), PriceJump(ean, name, old, new, percent)))
+    return [jump for _, jump in sorted(jumps, key=lambda j: (j[0], j[1].ean))]
+
+
+def is_suspicious(jumps: int, price_changes: int, banner_percent: int) -> bool:
+    """True when more than ``banner_percent`` of the price changes jump:
+    ``jumps * 100 > price_changes * banner_percent`` (strict). Never with no changes."""
+    return price_changes > 0 and jumps * 100 > price_changes * banner_percent
+
+
+@dataclass(frozen=True, slots=True)
 class ImportDiff:
     new: list[DiffEntry] = field(default_factory=list)
     changed: list[DiffEntry] = field(default_factory=list)
     unchanged: list[DiffEntry] = field(default_factory=list)
     rejected: list[RejectedRow] = field(default_factory=list)
     missing: list[MissingProduct] = field(default_factory=list)
+    #: Price changes above ``jump_thresholds.warn_percent``, largest first. Warnings
+    #: only: these rows are applied like any other.
+    price_jumps: list[PriceJump] = field(default_factory=list)
+    #: More than ``jump_thresholds.banner_percent`` of the price changes jump: show
+    #: a banner (wrong column or file?) and require ``confirm_price_jumps`` to apply.
+    suspicious: bool = False
+    jump_thresholds: JumpThresholds = field(default_factory=JumpThresholds)
 
     @property
     def manually_changed(self) -> list[DiffEntry]:
@@ -400,6 +477,7 @@ class ImportDiff:
             "missing": len(self.missing),
             "price_changed": sum(1 for e in self.changed if e.price_changed),
             "manually_changed": len(self.manually_changed),
+            "price_jumps": len(self.price_jumps),
         }
 
 
@@ -421,6 +499,7 @@ def build_diff(
     rows: Sequence[ImportRow],
     rejected: Sequence[RejectedRow],
     catalogue: Iterable[CatalogueEntry],
+    thresholds: JumpThresholds | None = None,
 ) -> ImportDiff:
     """Match accepted rows to the catalogue by EAN and classify them.
 
@@ -428,7 +507,12 @@ def build_diff(
     *unchanged* when its price and every field it carries equal the catalogue's, so a
     re-import of the same file shows no changes. Active catalogue products whose EAN
     appears nowhere in the file, not even in a rejected row, are listed as missing.
+
+    Price jumps are counted over the *price changes*: changed rows whose product had
+    a price and gets a different one. New products, unchanged rows and changes to
+    other fields only never count, either as jumps or towards the banner share.
     """
+    thresholds = thresholds or JumpThresholds()
     by_ean = {entry.ean: entry for entry in catalogue}
     new: list[DiffEntry] = []
     changed: list[DiffEntry] = []
@@ -462,4 +546,13 @@ def build_diff(
         ),
         key=lambda m: m.ean,
     )
-    return ImportDiff(new, changed, unchanged, list(rejected), missing)
+    price_changes = [
+        (e.row.ean, e.row.name, e.old_regular_cents, e.row.regular_cents)
+        for e in changed
+        if e.old_regular_cents is not None and e.old_regular_cents != e.row.regular_cents
+    ]
+    jumps = price_jumps(price_changes, thresholds.warn_percent)
+    suspicious = is_suspicious(len(jumps), len(price_changes), thresholds.banner_percent)
+    return ImportDiff(
+        new, changed, unchanged, list(rejected), missing, jumps, suspicious, thresholds
+    )

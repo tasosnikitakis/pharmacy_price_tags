@@ -354,7 +354,7 @@ def test_build_diff_classifies_rows() -> None:
     assert [(m.product_id, m.ean) for m in diff.missing] == [(4, "2000000000046")]
     assert diff.counts() == {
         "new": 1, "changed": 2, "unchanged": 1, "rejected": 1, "missing": 1,
-        "price_changed": 1, "manually_changed": 0,
+        "price_changed": 1, "manually_changed": 0, "price_jumps": 0,
     }  # fmt: skip
 
 

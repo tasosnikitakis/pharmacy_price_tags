@@ -181,11 +181,31 @@ class Settings(DatabaseSettings):
     store_id: int = 1
     display_timezone: str = "Europe/Athens"
     stale_import_days: int = 7
+    price_jump_warn_percent: int = Field(
+        default=50,
+        gt=0,
+        description="Import preview warns when a price changes by more than this percent",
+    )
+    price_jump_banner_percent: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="Banner and extra confirmation when more than this percent of the "
+        "price changes in an import warn",
+    )
 
     @field_validator("session_secret", "gateway_token")
     @classmethod
     def _check_secrets(cls, value: SecretStr) -> SecretStr:
         return check_secret(check_no_surrounding_whitespace(value))
+
+    @field_validator("price_jump_warn_percent", "price_jump_banner_percent", mode="before")
+    @classmethod
+    def _whole_percent(cls, value: object) -> object:
+        """Whole percents only: refuse floats (even ``50.0``) and booleans."""
+        if isinstance(value, bool | float):
+            raise ValueError("must be a whole number of percent")
+        return value
 
 
 def get_database_settings() -> DatabaseSettings:

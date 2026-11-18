@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from core.config import Settings, get_settings
 from core.db.models import (
     DEFAULT_STORE_ID,
     EventLog,
@@ -40,6 +41,8 @@ from core.domain.catalogue import (
     CatalogueEntry,
     DiffEntry,
     ImportDiff,
+    JumpThresholds,
+    PriceJump,
     build_diff,
     normalise_text,
 )
@@ -59,6 +62,27 @@ SYSTEM_ACTOR = "system"
 #: Column lengths of ``import_profile.name`` and ``import_run.filename``.
 PROFILE_NAME_MAX_LEN = 100
 FILENAME_MAX_LEN = 255
+
+
+class ImportConfirmationRequired(ValueError):
+    """Applying needs ``confirm_price_jumps=True``: too many prices jump at once,
+    which suggests a wrong column or the wrong file. Nothing was written."""
+
+    def __init__(self, jumps: list[PriceJump], price_changes: int, thresholds: JumpThresholds):
+        super().__init__(
+            f"{len(jumps)} of {price_changes} price changes are over "
+            f"{thresholds.warn_percent}%, more than {thresholds.banner_percent}% of them: "
+            "check the price column and the file, then confirm the price jumps to apply"
+        )
+        self.jumps = jumps
+        self.price_changes = price_changes
+        self.thresholds = thresholds
+
+
+def jump_thresholds(settings: Settings | None = None) -> JumpThresholds:
+    """The price-jump thresholds configured in settings."""
+    settings = settings or get_settings()
+    return JumpThresholds(settings.price_jump_warn_percent, settings.price_jump_banner_percent)
 
 
 class NotFound(LookupError):
@@ -369,12 +393,17 @@ def preview_import(
     data: bytes,
     filename: str,
     profile: ImportProfile,
+    thresholds: JumpThresholds | None = None,
 ) -> ImportPreview:
     """Parse ``data`` with ``profile`` and diff it against the catalogue (section 6,
-    step 3). Raises ``ImportFormatError`` if the file as a whole cannot be read."""
+    step 3). The diff carries the price jumps and the ``suspicious`` flag, with
+    ``thresholds`` or, by default, those from settings. Raises ``ImportFormatError``
+    if the file as a whole cannot be read."""
     _check_filename(filename)
+    thresholds = thresholds or jump_thresholds()
     parsed = _parse(data, profile)
-    diff = build_diff(parsed.rows, parsed.rejected, catalogue_entries(session, profile.store_id))
+    catalogue = catalogue_entries(session, profile.store_id)
+    diff = build_diff(parsed.rows, parsed.rejected, catalogue, thresholds)
     return ImportPreview(filename, profile.name, parsed.encoding, parsed.delimiter, diff)
 
 
@@ -387,12 +416,16 @@ def apply_import(
     actor: str,
     created_by: int | None = None,
     now: datetime | None = None,
+    confirm_price_jumps: bool = False,
+    thresholds: JumpThresholds | None = None,
 ) -> ImportResult:
     """Apply a file in one transaction (section 6, step 4).
 
     The diff is rebuilt here after locking the store, its products and its ``price``
-    rows, so it
-    reflects the catalogue at the moment of writing. New products are created; changed
+    rows, so it reflects the catalogue at the moment of writing. If it is
+    ``suspicious`` (too many price jumps, see ``build_diff``) this raises
+    ``ImportConfirmationRequired`` and writes nothing, unless ``confirm_price_jumps``
+    is true. Jumping rows are never rejected one by one. New products are created; changed
     prices go through ``apply_price_change`` with source ``import`` and the stored
     promo passed through unchanged; changed product fields go through
     ``apply_product_change`` and are logged per product as ``product.edited`` with the
@@ -403,6 +436,7 @@ def apply_import(
     _check_filename(filename)
     now = _check_now(now)
     store_id = profile.store_id
+    thresholds = thresholds or jump_thresholds()
     parsed = _parse(data, profile)
     with session.begin_nested():
         # Lock order, the same in every writer: store (imports only), then products,
@@ -420,7 +454,13 @@ def apply_import(
             .execution_options(populate_existing=True)
         )
         prices = {price.product_id: price for price in locked}
-        diff = build_diff(parsed.rows, parsed.rejected, catalogue_entries(session, store_id))
+        catalogue = catalogue_entries(session, store_id)
+        diff = build_diff(parsed.rows, parsed.rejected, catalogue, thresholds)
+        if diff.suspicious and not confirm_price_jumps:
+            price_changes = sum(
+                1 for e in diff.changed if e.price_changed and e.old_regular_cents is not None
+            )
+            raise ImportConfirmationRequired(diff.price_jumps, price_changes, thresholds)
         matched = [*diff.changed, *diff.unchanged]
         # Under READ COMMITTED a product committed while this import waited for a lock
         # is visible to the diff but was not in the locked set; lock those too.
@@ -474,6 +514,13 @@ def apply_import(
                 "encoding": parsed.encoding,
                 "delimiter": parsed.delimiter,
                 "counts": counts,
+                "price_jumps": len(diff.price_jumps),
+                "price_jumps_suspicious": diff.suspicious,
+                "price_jumps_confirmed": diff.suspicious and confirm_price_jumps,
+                "jump_thresholds": {
+                    "warn_percent": thresholds.warn_percent,
+                    "banner_percent": thresholds.banner_percent,
+                },
             },
             actor,
             now,
