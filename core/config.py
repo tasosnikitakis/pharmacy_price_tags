@@ -16,7 +16,7 @@ from sqlalchemy.engine import make_url
 MIN_SECRET_LENGTH = 32
 
 #: Where Docker Compose mounts secret files; each file is named after a field.
-#: Environment variables take precedence over these files.
+#: Environment variables take precedence over these files. Read once, at import time.
 _SECRETS_DIR = os.environ.get("SECRETS_DIR", "/run/secrets")
 SECRETS_DIR = _SECRETS_DIR if os.path.isdir(_SECRETS_DIR) else None
 
@@ -67,9 +67,12 @@ class DatabaseSettings(BaseSettings):
         if not password:
             raise ValueError("database_password is empty")
         url = make_url(self.database_url.get_secret_value())
-        if url.password is None:
-            merged = url.set(password=password).render_as_string(hide_password=False)
-            self.database_url = SecretStr(merged)
+        if url.password is not None:
+            raise ValueError(
+                "database password given twice: in DATABASE_URL and as database_password"
+            )
+        merged = url.set(password=password).render_as_string(hide_password=False)
+        self.database_url = SecretStr(merged)
         return self
 
 

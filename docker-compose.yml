@@ -35,6 +35,13 @@ services:
         condition: service_healthy
     ports:
       - "${CORE_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
     restart: unless-stopped
 
 secrets:

@@ -48,7 +48,7 @@ class ProductFacts:
     ean: str
     name: str
     brand: str | None
-    pack_qty: int | None
+    pack_qty_milli: int | None  # thousandths of pack_unit: 4.8 g -> 4800
     pack_unit: PackUnit | None
     unit_price_required: bool
     is_rx: bool

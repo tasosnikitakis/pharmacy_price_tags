@@ -10,9 +10,11 @@ import pytest
 from core.domain.pricing import (
     PromoRefusal,
     PromoRefused,
+    TemplateChoice,
     UnitPrice,
     build_label_data,
     choose_template,
+    effective_template,
     format_price,
     history_rows_for_change,
     lowest_prior_price,
@@ -47,7 +49,8 @@ def _point(cents: int, days_before: int, kind: PriceKind = PriceKind.REGULAR) ->
 def _product(**kw: object) -> ProductFacts:
     base: dict[str, object] = dict(
         product_id=1, ean="5201234567890", name="Κρέμα χεριών", brand="Korres",
-        pack_qty=200, pack_unit=PackUnit.MILLILITRE, unit_price_required=False, is_rx=False,
+        pack_qty_milli=200_000, pack_unit=PackUnit.MILLILITRE, unit_price_required=False,
+        is_rx=False,
     )  # fmt: skip
     base.update(kw)
     return ProductFacts(**base)  # type: ignore[arg-type]
@@ -61,7 +64,11 @@ def test_format_price(cents: int, text: str) -> None:
 
 
 def test_unit_price_per_kg() -> None:
-    assert unit_price(450, 200, PackUnit.GRAM) == UnitPrice(2250, UnitBasis.KILOGRAM)
+    assert unit_price(450, 200_000, PackUnit.GRAM) == UnitPrice(2250, UnitBasis.KILOGRAM)
+
+
+def test_unit_price_fractional_pack() -> None:
+    assert unit_price(390, 4_800, PackUnit.GRAM) == UnitPrice(81250, UnitBasis.KILOGRAM)
 
 
 def test_lowest_prior_price_includes_price_in_effect_at_window_start() -> None:
@@ -140,6 +147,16 @@ def test_rx_never_gets_promo_template() -> None:
     assert choose_template(_product(is_rx=True), price, T0 + timedelta(hours=1)) is not (
         TemplateKey.PROMO
     )
+
+
+def test_refused_promo_falls_back_to_regular_label() -> None:
+    """A promo accepted earlier becomes refused once the 30-day low drops below it."""
+    price = PriceState(1000, 800, T0, T0 + timedelta(days=7))
+    history = [_point(1000, 60), _point(790, 3)]  # import lowered the price 3 days ago
+    choice = effective_template(
+        TemplateKey.STANDARD, _product(), price, history, T0 + timedelta(hours=1)
+    )
+    assert choice == TemplateChoice(TemplateKey.STANDARD, PromoRefusal.NOT_A_DISCOUNT)
 
 
 def test_promo_label_never_built_without_prior_price() -> None:

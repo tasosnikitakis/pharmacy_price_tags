@@ -77,9 +77,12 @@ RENDER_MEDIA_TYPE = "image/png"
 class JobResultRequest(_Model):
     """Result of one push. ``failed`` needs an ``error_code``; ``acked`` must have none.
 
-    Violations are rejected with 422 before they reach the state machine.
+    Violations are rejected with 422 before they reach the state machine. A result
+    whose ``attempt`` is not the job's current claim (a late result from a claim that
+    timed out and was handed out again) is rejected with 409 and changes nothing.
     """
 
+    attempt: int = Field(ge=1, description="The ``attempt`` of the ClaimedJob being reported")
     outcome: JobOutcome
     error_code: PushErrorCode | None = None
     error_detail: str | None = Field(default=None, max_length=500)

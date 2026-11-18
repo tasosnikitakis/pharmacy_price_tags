@@ -125,7 +125,7 @@ def upgrade() -> None:
         sa.Column("ean", sa.String(length=14), nullable=False),
         sa.Column("name", sa.String(length=300), nullable=False),
         sa.Column("brand", sa.String(length=200), nullable=True),
-        sa.Column("pack_qty", sa.Integer(), nullable=True),
+        sa.Column("pack_qty_milli", sa.Integer(), nullable=True),
         sa.Column("pack_unit", sa.String(length=8), nullable=True),
         sa.Column(
             "unit_price_required", sa.Boolean(), server_default=sa.text("false"), nullable=False
@@ -150,11 +150,12 @@ def upgrade() -> None:
             name=op.f("ck_product_pack_unit"),
         ),
         sa.CheckConstraint(
-            "NOT unit_price_required OR (pack_qty IS NOT NULL AND pack_unit IS NOT NULL)",
+            "NOT unit_price_required OR (pack_qty_milli IS NOT NULL AND pack_unit IS NOT NULL)",
             name=op.f("ck_product_unit_price_needs_pack"),
         ),
         sa.CheckConstraint(
-            "pack_qty IS NULL OR pack_qty > 0", name=op.f("ck_product_pack_qty_positive")
+            "pack_qty_milli IS NULL OR pack_qty_milli > 0",
+            name=op.f("ck_product_pack_qty_positive"),
         ),
         sa.ForeignKeyConstraint(["store_id"], ["store.id"], name=op.f("fk_product_store_id_store")),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_product")),

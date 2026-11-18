@@ -72,16 +72,20 @@ def test_api_models_reject_unknown_fields() -> None:
 
 
 def test_job_result_request() -> None:
-    req = JobResultRequest(outcome=JobOutcome.FAILED, error_code=PushError.TIMEOUT, duration_ms=1)
+    req = JobResultRequest(
+        attempt=1, outcome=JobOutcome.FAILED, error_code=PushError.TIMEOUT, duration_ms=1
+    )
     assert req.model_dump(mode="json")["error_code"] == "timeout"
-    JobResultRequest(outcome=JobOutcome.ACKED, duration_ms=1)
+    JobResultRequest(attempt=1, outcome=JobOutcome.ACKED, duration_ms=1)
 
 
 def test_job_result_code_must_match_outcome() -> None:
     with pytest.raises(ValidationError):
-        JobResultRequest(outcome=JobOutcome.FAILED, duration_ms=1)
+        JobResultRequest(attempt=1, outcome=JobOutcome.FAILED, duration_ms=1)
     with pytest.raises(ValidationError):
-        JobResultRequest(outcome=JobOutcome.ACKED, error_code=PushError.TIMEOUT, duration_ms=1)
+        JobResultRequest(
+            attempt=1, outcome=JobOutcome.ACKED, error_code=PushError.TIMEOUT, duration_ms=1
+        )
 
 
 def test_job_state_names_match_domain_and_db() -> None:

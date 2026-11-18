@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,26 @@ def test_no_io_imports(path: Path) -> None:
 @pytest.mark.parametrize("path", sorted(DOMAIN.rglob("*.py")), ids=lambda p: p.name)
 def test_no_io_builtins(path: Path) -> None:
     assert not _calls(path) & FORBIDDEN_CALLS, path.name
+
+
+FORBIDDEN_LOADED = (
+    "sqlalchemy", "alembic", "psycopg", "fastapi", "starlette", "httpx", "PIL", "bleak",
+    "core.db", "core.app", "core.importers", "core.render.renderer", "gateway",
+)  # fmt: skip
+
+
+def test_no_io_modules_loaded_transitively() -> None:
+    """Importing the domain must not pull I/O libraries in through other packages."""
+    code = (
+        "import sys, core.domain.pricing, core.domain.reconciler, core.domain.types\n"
+        "print('\\n'.join(sorted(sys.modules)))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True,
+        cwd=DOMAIN.parents[1],
+    ).stdout.split()  # fmt: skip
+    bad = [m for m in loaded if any(m == f or m.startswith(f + ".") for f in FORBIDDEN_LOADED)]
+    assert bad == []
 
 
 def test_scan_found_files() -> None:

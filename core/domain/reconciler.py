@@ -27,6 +27,12 @@ Rules:
   database enforces this with a partial unique index.
 - The caller sets ``tag.desired_hash_changed_at`` whenever it changes
   ``tag.desired_hash``; ``plan_updates`` uses it to decide whether a dead job is stale.
+- One clock: every timestamp these rules compare (``created_at`` and the job times,
+  ``desired_hash_changed_at``) is the ``now`` the caller passes in, a timezone-aware
+  UTC ``datetime`` taken once per transaction in Python, and the caller writes it
+  explicitly. Database ``now()`` defaults are only a fallback for audit columns.
+- A result is matched to a claim by ``attempt``: a late result from an earlier claim
+  of the same job raises ``StaleResult`` and changes nothing.
 """
 
 from __future__ import annotations
@@ -89,6 +95,10 @@ class CancelJob:
 Action = CreateJob | CancelJob
 
 
+class StaleResult(ValueError):
+    """A result for a claim that is no longer current. The API answers 409."""
+
+
 @dataclass(frozen=True, slots=True)
 class JobTransition:
     """The complete new values of a job's mutable fields after one event.
@@ -128,7 +138,7 @@ def plan_updates(
 
     Dead-job suppression: if the tag's most recent ``dead`` job (in ``latest_dead``)
     is for ``desired_hash`` and was created at or after ``desired_hash_changed_at``,
-    nothing is created. It stays visible in monitoring until an admin retries it.
+    nothing is created. It stays visible in monitoring until an admin retries it (``admin_retry``).
     If ``desired_hash`` changed after that job was created (even back to the same
     hash), the dead job is stale and a new job is created.
 
@@ -150,19 +160,22 @@ def claim(job: JobSnapshot, gateway_id: int, now: datetime) -> JobTransition:
 
 def apply_result(
     job: JobSnapshot,
+    attempt: int,
     outcome: JobOutcome,
     error_code: PushErrorCode | None,
     now: datetime,
     error: str | None = None,
 ) -> JobTransition:
-    """Transition for a result reported by the gateway.
+    """Transition for a result reported by the gateway for claim ``attempt``.
 
     ``acked`` -> state ``acked``, errors cleared, ``set_displayed_hash = job.render_hash``.
     ``failed`` -> ``failed`` with ``next_attempt_at`` from ``next_attempt_at()``, or
     ``dead`` (``next_attempt_at = None``) at ``MAX_ATTEMPTS``; ``error_code`` and
     ``error`` recorded. ``claimed_at`` is kept for the record.
-    Raises ``ValueError`` unless the job is ``claimed``, if a failure has no code, or
-    if an ack has one.
+
+    Raises ``StaleResult`` unless the job is ``claimed`` with ``attempts == attempt``
+    (a late result after a reclaim, or a duplicate). Raises ``ValueError`` if a failure
+    has no code or an ack has one.
     """
     raise NotImplementedError
 
@@ -190,5 +203,19 @@ def reclaim_stale(jobs: Sequence[JobSnapshot], now: datetime) -> list[JobTransit
 
     Back to ``queued`` (``claimed_at`` and ``gateway_id`` cleared) or, if
     ``attempts >= MAX_ATTEMPTS``, to ``dead``. ``error_code`` becomes ``timeout``.
+    """
+    raise NotImplementedError
+
+
+def admin_retry(tag: TagSnapshot, dead_job: JobSnapshot, now: datetime) -> list[Action]:
+    """An admin's "retry" on a dead job (Tags page, section 9).
+
+    Returns ``[CreateJob(tag.tag_id, tag.desired_hash)]`` when the tag still needs an
+    update; the new job starts with ``attempts = 0`` and ``created_at = now``, so dead-job
+    suppression no longer applies. Returns ``[]`` when the tag is up to date or
+    ``desired_hash`` is ``None``. The dead job stays as it is, for the record. Raises
+    ``ValueError`` if ``dead_job`` is not ``dead`` or belongs to another tag. The caller
+    must hold no active job for the tag (the unique index enforces it) and logs
+    ``job.retry`` in ``event_log``.
     """
     raise NotImplementedError

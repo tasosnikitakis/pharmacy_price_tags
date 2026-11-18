@@ -106,9 +106,9 @@ class Product(Base):
     __table_args__ = (
         UniqueConstraint("store_id", "ean"),
         CheckConstraint(f"pack_unit IS NULL OR {_in('pack_unit', PACK_UNITS)}", name="pack_unit"),
-        CheckConstraint("pack_qty IS NULL OR pack_qty > 0", name="pack_qty_positive"),
+        CheckConstraint("pack_qty_milli IS NULL OR pack_qty_milli > 0", name="pack_qty_positive"),
         CheckConstraint(
-            "NOT unit_price_required OR (pack_qty IS NOT NULL AND pack_unit IS NOT NULL)",
+            "NOT unit_price_required OR (pack_qty_milli IS NOT NULL AND pack_unit IS NOT NULL)",
             name="unit_price_needs_pack",
         ),
     )
@@ -118,7 +118,9 @@ class Product(Base):
     ean: Mapped[str] = mapped_column(String(14))
     name: Mapped[str] = mapped_column(String(300))
     brand: Mapped[str | None] = mapped_column(String(200))
-    pack_qty: Mapped[int | None] = mapped_column(Integer)  # in pack_unit
+    # Pack size in thousandths of pack_unit: 4.8 g -> 4800, 200 ml -> 200000, 30 pieces
+    # -> 30000. Integer, like money, so no float ever reaches a legal unit price.
+    pack_qty_milli: Mapped[int | None] = mapped_column(Integer)
     pack_unit: Mapped[str | None] = mapped_column(String(8))
     unit_price_required: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     is_rx: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))

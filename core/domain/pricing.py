@@ -69,11 +69,14 @@ def format_price(cents: int) -> str:
     raise NotImplementedError
 
 
-def unit_price(price_cents: int, pack_qty: int, pack_unit: PackUnit) -> UnitPrice:
+def unit_price(price_cents: int, pack_qty_milli: int, pack_unit: PackUnit) -> UnitPrice:
     """Price per kg (for g), per litre (for ml) or per piece (for pieces).
 
-    Rounded half up to whole cents. Raises ``ValueError`` if ``pack_qty`` is not positive.
-    Example: 450 cents for 200 g -> 2250 cents per kg.
+    ``pack_qty_milli`` is the pack size in thousandths of ``pack_unit``. Integer
+    arithmetic only, rounded half up to whole cents. Raises ``ValueError`` if
+    ``pack_qty_milli`` is not positive.
+    Examples: 450 cents for 200 g (200000) -> 2250 cents per kg; 390 cents for 4.8 g
+    (4800) -> 81250 cents per kg.
     """
     raise NotImplementedError
 
@@ -109,6 +112,10 @@ def history_rows_for_change(
 
     Because later rows override the timeline from their ``valid_from`` on, row 1 also
     cancels any previously scheduled promo rows that ``new`` no longer contains.
+
+    Concurrency: the caller must lock the ``price`` row (``SELECT ... FOR UPDATE``)
+    before reading it, then update it and insert these rows in the same transaction,
+    so history id order always matches the order of writes to ``price``.
     """
     raise NotImplementedError
 
@@ -163,8 +170,37 @@ def promo_active(price: PriceState, now: datetime) -> bool:
 
 
 def choose_template(product: ProductFacts, price: PriceState, now: datetime) -> TemplateKey:
-    """Default template for a product: ``promo`` if a promo is active (never for Rx),
-    else ``unit_price`` if ``unit_price_required``, else ``standard``."""
+    """Default template offered when binding: ``promo`` if a promo is active (never for
+    Rx), else ``unit_price`` if ``unit_price_required``, else ``standard``."""
+    raise NotImplementedError
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateChoice:
+    """The template a tag shows now, and why a promo is not shown if it is refused."""
+
+    template: TemplateKey
+    promo_refused: PromoRefusal | None = None
+
+
+def effective_template(
+    bound: TemplateKey,
+    product: ProductFacts,
+    price: PriceState,
+    history: Sequence[PricePoint],
+    now: datetime,
+) -> TemplateChoice:
+    """The template to render for a tag bound with template ``bound``, at ``now``.
+
+    - A promo is active and ``validate_promo`` accepts it: ``promo``.
+    - A promo is active but refused (e.g. an import lowered the 30-day low below the
+      promo price, or a promo change cleared the manual prior price): the regular
+      template (``unit_price`` if ``unit_price_required``, else ``standard``) with
+      ``promo_refused`` set. The tag shows the regular price, never an unlawful promo;
+      the caller logs ``promo.refused`` once per promo and monitoring lists it.
+    - No promo active and ``bound`` is ``promo``: the regular template, no refusal.
+    - Otherwise ``bound``; ``unit_price`` wins over ``standard`` when required.
+    """
     raise NotImplementedError
 
 

@@ -103,6 +103,17 @@ def test_database_password_from_secret_file(
     )
 
 
+def test_database_password_given_twice_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from core.config import DatabaseSettings
+
+    (tmp_path / "database_password").write_text("from-file", encoding="utf-8")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://esl:other@db:5432/esl")
+    with pytest.raises(ValueError, match="twice"):
+        DatabaseSettings(_secrets_dir=tmp_path)
+
+
 def test_empty_database_password_is_rejected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

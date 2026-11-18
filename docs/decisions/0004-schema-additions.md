@@ -8,6 +8,7 @@ of the plan needs, so workstreams rarely need migrations of their own:
 | `import_profile` (15th table) | `name`, `mapping` (JSONB), `encoding`, `delimiter` | Section 6 step 1: saved column mappings |
 | `import_run` | `profile_id` (FK to `import_profile`), `created_by` | Section 6 |
 | `product` | `manually_changed_at` | Section 6: flag manual edits in the next import preview |
+| `product` | `pack_qty_milli` instead of `pack_qty` | Pack size in thousandths of `pack_unit` (4.8 g -> 4800), integer like money, so 4.8 g or 7.5 ml packs get an exact unit price |
 | `price` | `promo_prior_cents` | Section 6: prior price entered by hand when history is under 30 days |
 | `price_history` | `import_run_id`, `created_at` | Tracing a change to its import |
 | `tag` | `battery_mv`, `battery_pct` instead of one `battery` | Tags report voltage or percent; unknown until M4 |

@@ -16,6 +16,15 @@ the shelf when. Writing the promo's end together with its start means the histor
 never says a promo lasted longer than it did. The override rule means a cancelled or
 changed promo needs no deletion, which the append-only trigger forbids anyway.
 
+**Concurrency.** Writers lock the `price` row (`SELECT ... FOR UPDATE`) before reading
+it, then update it and insert the history rows in the same transaction, so history id
+order always matches the order of writes.
+
+**A promo refused later.** A promo accepted when entered can become unlawful before it
+ends, for example when an import lowers the price inside its 30-day window. Then
+`effective_template` renders the regular label instead, records `promo.refused` once,
+and monitoring lists the product. A tag never shows a promo without a valid prior price.
+
 **Consequences.** The lowest prior price counts both regular and earlier promo prices
 that were in effect at any moment of `[promo_from - 30 days, promo_from)`. `promo_to`
 is exclusive; labels show its previous day as the last day of the promo.

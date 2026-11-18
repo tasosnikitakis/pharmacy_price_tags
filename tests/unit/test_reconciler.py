@@ -14,7 +14,9 @@ from core.domain.reconciler import (
     CreateJob,
     JobSnapshot,
     JobState,
+    StaleResult,
     TagSnapshot,
+    admin_retry,
     apply_result,
     claim,
     next_attempt_at,
@@ -52,7 +54,7 @@ def test_claimed_job_is_never_cancelled_and_ack_sets_its_own_hash() -> None:
 
     assert plan_updates([tag], [claimed]) == []
 
-    transition = apply_result(claimed, JobOutcome.ACKED, None, NOW)
+    transition = apply_result(claimed, 1, JobOutcome.ACKED, None, NOW)
     assert transition.state is JobState.ACKED
     assert transition.set_displayed_hash == OLD
 
@@ -95,7 +97,7 @@ def test_failures_end_in_dead_after_max_attempts() -> None:
     for attempt in range(1, MAX_ATTEMPTS + 1):
         c = claim(job, 1, NOW)
         job = _job(JobState.CLAIMED, attempts=c.attempts, claimed_at=NOW)
-        r = apply_result(job, JobOutcome.FAILED, PushErrorCode.TIMEOUT, NOW)
+        r = apply_result(job, c.attempts, JobOutcome.FAILED, PushErrorCode.TIMEOUT, NOW)
         expected = JobState.DEAD if attempt == MAX_ATTEMPTS else JobState.FAILED
         assert r.state is expected
         job = _job(JobState.QUEUED, attempts=r.attempts)
@@ -106,6 +108,24 @@ def test_stale_claim_returns_to_queued() -> None:
     fresh = _job(JobState.CLAIMED, attempts=1, claimed_at=NOW - timedelta(minutes=1))
     transitions = reclaim_stale([stale, fresh], NOW)
     assert [(t.state, t.claimed_at) for t in transitions] == [(JobState.QUEUED, None)]
+
+
+def test_late_result_from_earlier_claim_is_rejected() -> None:
+    """Claim 1 timed out and the job was claimed again (attempts=2); claim 1's
+    delayed result must not touch the job."""
+    reclaimed = _job(JobState.CLAIMED, attempts=2, claimed_at=NOW)
+    with pytest.raises(StaleResult):
+        apply_result(reclaimed, 1, JobOutcome.FAILED, PushErrorCode.TIMEOUT, NOW)
+    with pytest.raises(StaleResult):
+        apply_result(reclaimed, 1, JobOutcome.ACKED, None, NOW)
+    assert apply_result(reclaimed, 2, JobOutcome.ACKED, None, NOW).state is JobState.ACKED
+
+
+def test_admin_retry_creates_fresh_job() -> None:
+    dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS, created_at=NOW - timedelta(hours=1))
+    tag = TagSnapshot(10, NEW, OLD, desired_hash_changed_at=NOW - timedelta(hours=2))
+    assert admin_retry(tag, dead, NOW) == [CreateJob(10, NEW)]
+    assert admin_retry(TagSnapshot(10, NEW, NEW), dead, NOW) == []
 
 
 def test_stale_claim_at_max_attempts_is_dead() -> None:
