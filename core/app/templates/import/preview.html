@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}{{ t("import.preview.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("import.preview.title") }}</h1>
+<p class="sub">{{ t("import.preview.file", filename=preview.filename, profile=preview.profile_name, encoding=preview.encoding, delimiter=delimiter_name) }}</p>
+{% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
+
+{% if diff.suspicious %}
+<div class="banner" role="alert" id="jump-banner">
+  <h2>{{ t("import.preview.suspicious.title") }}</h2>
+  <p>{{ t("import.preview.suspicious.text", jumps=diff.price_jumps | length, changes=counts.price_changed, warn=diff.jump_thresholds.warn_percent, banner=diff.jump_thresholds.banner_percent) }}</p>
+</div>
+{% endif %}
+
+<ul class="counts">
+  <li>{{ t("import.count.new") }}: <strong>{{ counts.new }}</strong></li>
+  <li>{{ t("import.count.changed") }}: <strong>{{ counts.changed }}</strong></li>
+  <li>{{ t("import.count.unchanged") }}: <strong>{{ counts.unchanged }}</strong></li>
+  <li>{{ t("import.count.rejected") }}: <strong>{{ counts.rejected }}</strong></li>
+  <li>{{ t("import.count.missing") }}: <strong>{{ counts.missing }}</strong></li>
+  <li>{{ t("import.count.manually_changed") }}: <strong>{{ counts.manually_changed }}</strong></li>
+  <li>{{ t("import.count.price_jumps") }}: <strong>{{ counts.price_jumps }}</strong></li>
+</ul>
+
+<section class="card">
+  <form method="post" action="/import/apply" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if diff.suspicious %}
+    <label class="check strong"><input type="checkbox" name="confirm_price_jumps" value="true" required> {{ t("import.preview.confirm_jumps") }}</label>
+    {% endif %}
+    <button type="submit">{{ t("import.preview.apply") }}</button>
+  </form>
+  <form method="post" action="/import/cancel" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="secondary">{{ t("import.cancel") }}</button>
+  </form>
+</section>
+
+{% if diff.price_jumps %}
+<section class="card" aria-labelledby="jumps-h">
+  <h2 id="jumps-h">{{ t("import.preview.jumps.title", warn=diff.jump_thresholds.warn_percent) }}</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">{{ t("import.col.ean") }}</th><th scope="col">{{ t("import.col.name") }}</th>
+      <th scope="col" class="num">{{ t("import.col.old") }}</th><th scope="col" class="num">{{ t("import.col.new") }}</th>
+      <th scope="col" class="num">{{ t("import.col.change") }}</th></tr></thead>
+    <tbody>
+    {% for j in diff.price_jumps %}
+      <tr><td class="mono">{{ j.ean }}</td><td>{{ j.name }}</td><td class="num">{{ j.old_cents | money }}</td>
+        <td class="num">{{ j.new_cents | money }}</td><td class="num">{{ j.percent_change | percent }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if diff.rejected %}
+<section class="card" aria-labelledby="rejected-h">
+  <h2 id="rejected-h">{{ t("import.preview.rejected.title") }}</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col" class="num">{{ t("import.col.line") }}</th><th scope="col">{{ t("import.col.ean") }}</th><th scope="col">{{ t("import.col.reason") }}</th></tr></thead>
+    <tbody>
+    {% for r in diff.rejected %}
+      <tr><td class="num">{{ r.line }}</td><td class="mono">{{ r.ean or "" }}</td><td>{{ r.reason | row_reason }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if diff.changed %}
+<section class="card" aria-labelledby="changed-h">
+  <h2 id="changed-h">{{ t("import.preview.changed.title") }}</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">{{ t("import.col.ean") }}</th><th scope="col">{{ t("import.col.name") }}</th>
+      <th scope="col" class="num">{{ t("import.col.old") }}</th><th scope="col" class="num">{{ t("import.col.new") }}</th>
+      <th scope="col" class="num">{{ t("import.col.change") }}</th><th scope="col">{{ t("import.col.other_changes") }}</th></tr></thead>
+    <tbody>
+    {% for e in diff.changed %}
+      <tr>
+        <td class="mono">{{ e.row.ean }}</td>
+        <td>{{ e.row.name }}{% if e.manually_changed %} <span class="badge">{{ t("products.manual") }}</span>{% endif %}</td>
+        <td class="num">{{ e.old_regular_cents | money if e.old_regular_cents is not none else t("products.no_price") }}</td>
+        <td class="num">{{ e.row.regular_cents | money }}</td>
+        <td class="num">{% if e.old_regular_cents is not none and e.price_changed %}{{ (e.row.regular_cents - e.old_regular_cents) | signed_money }}{% endif %}</td>
+        <td>{% for c in e.field_changes %}{{ t("import.field." + c.field) }}: {{ field_value(c.field, c.old) }} → {{ field_value(c.field, c.new) }}{% if not loop.last %}; {% endif %}{% endfor %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if diff.new %}
+<section class="card" aria-labelledby="new-h">
+  <h2 id="new-h">{{ t("import.preview.new.title") }}</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">{{ t("import.col.ean") }}</th><th scope="col">{{ t("import.col.name") }}</th><th scope="col">{{ t("import.col.brand") }}</th><th scope="col" class="num">{{ t("import.col.price") }}</th></tr></thead>
+    <tbody>
+    {% for e in diff.new %}
+      <tr><td class="mono">{{ e.row.ean }}</td><td>{{ e.row.name }}</td><td>{{ e.row.brand or "" }}</td><td class="num">{{ e.row.regular_cents | money }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if diff.manually_changed %}
+<section class="card" aria-labelledby="manual-h">
+  <h2 id="manual-h">{{ t("import.preview.manual.title") }}</h2>
+  <p class="hint">{{ t("import.preview.manual.hint") }}</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th scope="col">{{ t("import.col.ean") }}</th><th scope="col">{{ t("import.col.name") }}</th><th scope="col" class="num">{{ t("import.col.catalogue") }}</th><th scope="col" class="num">{{ t("import.col.file") }}</th></tr></thead>
+    <tbody>
+    {% for e in diff.manually_changed %}
+      <tr><td class="mono">{{ e.row.ean }}</td><td>{{ e.row.name }}</td><td class="num">{{ e.old_regular_cents | money }}</td><td class="num">{{ e.row.regular_cents | money }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</section>
+{% endif %}
+
+{% if diff.missing %}
+<section class="card" aria-labelledby="missing-h">
+  <h2 id="missing-h">{{ t("import.preview.missing.title") }}</h2>
+  <p class="hint">{{ t("import.preview.missing.hint") }}</p>
+  <ul>{% for m in diff.missing %}<li><span class="mono">{{ m.ean }}</span> {{ m.name }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+{% if diff.unchanged %}
+<section class="card">
+  <details>
+    <summary>{{ t("import.preview.unchanged.title", count=diff.unchanged | length) }}</summary>
+    <ul>{% for e in diff.unchanged %}<li><span class="mono">{{ e.row.ean }}</span> {{ e.row.name }} · {{ e.row.regular_cents | money }}</li>{% endfor %}</ul>
+  </details>
+</section>
+{% endif %}
+{% endblock %}

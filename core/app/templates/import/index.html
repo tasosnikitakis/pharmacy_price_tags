@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}{{ t("import.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("import.title") }}</h1>
+{% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
+
+{% if user.role == "admin" %}
+{% if pending %}
+<section class="card">
+  <p>{{ t("import.pending", filename=pending.filename) }}</p>
+  <form method="post" action="/import/cancel" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="secondary">{{ t("import.cancel") }}</button>
+  </form>
+</section>
+{% endif %}
+<section class="card" aria-labelledby="upload-h">
+  <h2 id="upload-h">{{ t("import.upload.title") }}</h2>
+  <form method="post" action="/import/preview" enctype="multipart/form-data" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="file">{{ t("import.upload.file") }}</label>
+    <input id="file" name="file" type="file" accept=".csv,.txt,text/csv,text/plain" required>
+    <label for="profile">{{ t("import.upload.profile") }}</label>
+    <select id="profile" name="profile">
+      {% for p in profiles %}
+      <option value="{{ p.name }}"{% if values.get('profile') == p.name %} selected{% endif %}>{{ p.name }}</option>
+      {% endfor %}
+      <option value=""{% if not profiles or values.get('profile') == '' %} selected{% endif %}>{{ t("import.upload.new_mapping") }}</option>
+    </select>
+    <fieldset>
+      <legend>{{ t("import.mapping.title") }}</legend>
+      <p class="hint">{{ t("import.mapping.hint") }}</p>
+      {% for column in columns %}
+      <label for="map_{{ column }}">{{ t("import.column." + column) }}{% if column in ("ean", "name", "price") %} *{% endif %}</label>
+      <input id="map_{{ column }}" name="map_{{ column }}" autocomplete="off" value="{{ values.get('map_' + column, '') }}">
+      {% endfor %}
+      <div class="row">
+        <div>
+          <label for="encoding">{{ t("import.mapping.encoding") }}</label>
+          <select id="encoding" name="encoding">
+            <option value="">{{ t("import.mapping.detect") }}</option>
+            <option value="utf-8"{% if values.get('encoding') == 'utf-8' %} selected{% endif %}>{{ t("import.mapping.utf8") }}</option>
+            <option value="cp1253"{% if values.get('encoding') == 'cp1253' %} selected{% endif %}>{{ t("import.mapping.cp1253") }}</option>
+          </select>
+        </div>
+        <div>
+          <label for="delimiter">{{ t("import.mapping.delimiter") }}</label>
+          <select id="delimiter" name="delimiter">
+            <option value="">{{ t("import.mapping.detect") }}</option>
+            <option value=";"{% if values.get('delimiter') == ';' %} selected{% endif %}>;</option>
+            <option value=","{% if values.get('delimiter') == ',' %} selected{% endif %}>,</option>
+            <option value="tab"{% if values.get('delimiter') == 'tab' %} selected{% endif %}>{{ t("import.mapping.tab") }}</option>
+          </select>
+        </div>
+      </div>
+      <label for="save_as">{{ t("import.mapping.save_as") }}</label>
+      <input id="save_as" name="save_as" maxlength="100" autocomplete="off" value="{{ values.get('save_as', '') }}">
+    </fieldset>
+    <button type="submit">{{ t("import.upload.preview") }}</button>
+  </form>
+</section>
+{% endif %}
+
+{% if profiles %}
+<section class="card" aria-labelledby="profiles-h">
+  <h2 id="profiles-h">{{ t("import.profiles.title") }}</h2>
+  <ul>
+  {% for p in profiles %}
+    <li><strong>{{ p.name }}</strong>:
+    {% for column in columns %}{% if p.mapping.get(column) %}{{ t("import.column." + column) }} = «{{ p.mapping[column] }}»{% if not loop.last %}, {% endif %}{% endif %}{% endfor %}</li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="card" aria-labelledby="runs-h">
+  <h2 id="runs-h">{{ t("import.runs.title") }}</h2>
+  {% if runs %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th scope="col">{{ t("import.runs.started") }}</th>
+      <th scope="col">{{ t("import.runs.file") }}</th>
+      <th scope="col">{{ t("import.runs.profile") }}</th>
+      <th scope="col">{{ t("import.runs.applied") }}</th>
+      <th scope="col" class="num">{{ t("import.count.new") }}</th>
+      <th scope="col" class="num">{{ t("import.count.changed") }}</th>
+      <th scope="col" class="num">{{ t("import.count.unchanged") }}</th>
+      <th scope="col" class="num">{{ t("import.count.rejected") }}</th>
+      <th scope="col" class="num">{{ t("import.count.missing") }}</th>
+    </tr></thead>
+    <tbody>
+    {% for item in runs %}
+      <tr>
+        <td>{{ item.run.started_at | datetime_el }}</td>
+        <td>{{ item.run.filename }}</td>
+        <td>{{ item.profile_name or t("import.runs.no_profile") }}</td>
+        <td>{{ item.run.applied_at | datetime_el if item.run.applied_at else t("import.runs.not_applied") }}</td>
+        <td class="num">{{ item.run.counts.get("new", 0) }}</td>
+        <td class="num">{{ item.run.counts.get("changed", 0) }}</td>
+        <td class="num">{{ item.run.counts.get("unchanged", 0) }}</td>
+        <td class="num">{{ item.run.counts.get("rejected", 0) }}</td>
+        <td class="num">{{ item.run.counts.get("missing", 0) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p>{{ t("import.runs.none") }}</p>
+  {% endif %}
+</section>
+{% endblock %}

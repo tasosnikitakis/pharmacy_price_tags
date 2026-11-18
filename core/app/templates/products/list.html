@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}{{ t("products.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("products.title") }}</h1>
+<form class="search" method="get" action="/products" role="search">
+  <label for="q">{{ t("products.search.label") }}</label>
+  <input id="q" name="q" type="search" value="{{ q }}" inputmode="search" autocomplete="off"
+         placeholder="{{ t('products.search.placeholder') }}"
+         hx-get="/products" hx-trigger="input changed delay:300ms, search"
+         hx-target="#results" hx-select="#results" hx-swap="outerHTML" hx-push-url="true">
+  <button type="submit">{{ t("products.search.submit") }}</button>
+</form>
+<div id="results">
+  {% if rows %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th scope="col">{{ t("products.col.name") }}</th>
+      <th scope="col">{{ t("products.col.ean") }}</th>
+      <th scope="col" class="num">{{ t("products.col.price") }}</th>
+      <th scope="col" class="num">{{ t("products.col.tags") }}</th>
+    </tr></thead>
+    <tbody>
+    {% for row in rows %}
+      <tr{% if not row.product.active %} class="muted"{% endif %}>
+        <td><a href="/products/{{ row.product.id }}">{{ row.product.name }}</a>
+          {% if row.product.brand %}<span class="sub">{{ row.product.brand }}</span>{% endif %}
+          {% if row.product.is_rx %}<span class="badge">{{ t("products.rx") }}</span>{% endif %}
+          {% if row.product.manually_changed_at %}<span class="badge">{{ t("products.manual") }}</span>{% endif %}
+          {% if not row.product.active %}<span class="badge">{{ t("products.inactive") }}</span>{% endif %}
+        </td>
+        <td class="mono">{{ row.product.ean }}</td>
+        <td class="num">{% if row.price %}{{ row.price.regular_cents | money }}{% if row.price.promo_cents is not none %} <span class="badge promo">{{ t("products.promo.badge") }}</span>{% endif %}{% else %}{{ t("products.no_price") }}{% endif %}</td>
+        <td class="num">{{ row.tag_count }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p>{{ t("products.none") }}</p>
+  {% endif %}
+</div>
+{% endblock %}

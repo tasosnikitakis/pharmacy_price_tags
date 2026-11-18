@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="{{ LANGUAGE }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"...","swap":true}],"historyCacheSize":0}'>
+  <title>{% block title %}{{ t("app.name") }}{% endblock %} · {{ t("app.name") }}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/vendor/htmx-2.0.11/htmx.min.js" defer></script>
+</head>
+<body hx-boost="true" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <a class="skip" href="#main">{{ t("nav.skip") }}</a>
+  <header class="top">
+    <span class="brand">{{ t("app.name") }}</span>
+    {% if user %}
+    <nav aria-label="{{ t('nav.label') }}">
+      <a href="/products"{% if request.url.path.startswith('/products') %} aria-current="page"{% endif %}>{{ t("nav.products") }}</a>
+      <a href="/import"{% if request.url.path.startswith('/import') %} aria-current="page"{% endif %}>{{ t("nav.import") }}</a>
+      <a href="/tags"{% if request.url.path.startswith('/tags') %} aria-current="page"{% endif %}>{{ t("nav.tags") }}</a>
+      {% if user.role == "admin" %}
+      <a href="/settings"{% if request.url.path.startswith('/settings') %} aria-current="page"{% endif %}>{{ t("nav.settings") }}</a>
+      {% endif %}
+    </nav>
+    <form class="logout" method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <span class="who">{{ user.email }} · {{ t("role." + user.role) }}</span>
+      <button type="submit" class="link">{{ t("nav.logout") }}</button>
+    </form>
+    {% endif %}
+  </header>
+  <main id="main">
+    {% for level, message in flashes %}
+    <p class="flash flash-{{ level }}" role="{{ 'alert' if level in ('error', 'warning') else 'status' }}">{{ message }}</p>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

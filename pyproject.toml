@@ -20,6 +20,7 @@ core = [
     "pillow>=11,<13",
     "jinja2>=3.1,<4",
     "python-multipart>=0.0.18",
+    "itsdangerous>=2.2,<3",  # signs the admin UI session cookie (SessionMiddleware)
 ]
 gateway = [
     "pydantic-settings>=2.6,<3",

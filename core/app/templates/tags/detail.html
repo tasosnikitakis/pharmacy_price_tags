@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}{{ t("tags.detail.title", code=row.tag.short_code) }}{% endblock %}
+{% block content %}
+{% set tag = row.tag %}
+<p><a href="/tags">{{ t("tags.back") }}</a></p>
+<h1>{{ t("tags.detail.title", code=tag.short_code) }}</h1>
+<p><span class="status status-{{ row.status.value }}">{{ t("tags.status." + row.status.value) }}</span></p>
+
+<div class="grid">
+<section class="card" aria-labelledby="labels-h">
+  <h2 id="labels-h">{{ t("tags.detail.labels") }}</h2>
+  <h3>{{ t("tags.detail.desired") }}</h3>
+  {% if tag.desired_hash %}
+  <img class="label-preview" width="{{ row.tag_type.width * 3 }}" height="{{ row.tag_type.height * 3 }}"
+       src="/tags/{{ tag.id }}/label/desired.png?v={{ tag.desired_hash }}" alt="{{ t('tags.detail.desired_alt', code=tag.short_code) }}">
+  {% else %}<p class="sub">{{ t("tags.detail.no_label") }}</p>{% endif %}
+  <h3>{{ t("tags.detail.displayed") }}</h3>
+  {% if tag.displayed_hash and tag.displayed_hash == tag.desired_hash %}
+  <p>{{ t("tags.detail.same_as_desired") }}</p>
+  {% elif tag.displayed_hash %}
+  <img class="label-preview" width="{{ row.tag_type.width * 3 }}" height="{{ row.tag_type.height * 3 }}"
+       src="/tags/{{ tag.id }}/label/displayed.png?v={{ tag.displayed_hash }}" alt="{{ t('tags.detail.displayed_alt', code=tag.short_code) }}">
+  {% else %}<p class="sub">{{ t("tags.detail.displayed_unknown") }}</p>{% endif %}
+</section>
+
+<section class="card" aria-labelledby="info-h">
+  <h2 id="info-h">{{ t("tags.detail.info") }}</h2>
+  <dl>
+    <dt>{{ t("tags.col.product") }}</dt>
+    <dd>{% if row.product %}<a href="/products/{{ row.product.id }}">{{ row.product.name }}</a> ({{ t("template." + row.template) }}){% else %}{{ t("tags.unbound") }}{% endif %}</dd>
+    <dt>{{ t("tags.col.type") }}</dt><dd>{{ row.tag_type.key }} · {{ row.tag_type.width }}×{{ row.tag_type.height }} · {{ row.tag_type.palette }}</dd>
+    <dt>{{ t("tags.detail.vendor_id") }}</dt><dd class="mono">{{ tag.vendor_id }}</dd>
+    <dt>{{ t("tags.col.last_seen") }}</dt><dd>{{ tag.last_seen_at | datetime_el if tag.last_seen_at else t("tags.never") }}</dd>
+    <dt>{{ t("tags.col.rssi") }}</dt><dd>{{ t("tags.rssi", value=tag.rssi) if tag.rssi is not none else t("tags.unknown") }}</dd>
+    <dt>{{ t("tags.col.battery") }}</dt><dd>{% if tag.battery_pct is not none %}{{ t("tags.battery_pct", value=tag.battery_pct) }}{% elif tag.battery_mv is not none %}{{ t("tags.battery_mv", value=tag.battery_mv) }}{% else %}{{ t("tags.unknown") }}{% endif %}</dd>
+    {% if tag.firmware %}<dt>{{ t("tags.detail.firmware") }}</dt><dd>{{ tag.firmware }}</dd>{% endif %}
+  </dl>
+  {% if user.role == "admin" %}
+    {% if row.dead_job_id %}
+    <form method="post" action="/tags/{{ tag.id }}/jobs/{{ row.dead_job_id }}/retry" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">{{ t("tags.retry") }}</button>
+    </form>
+    {% endif %}
+    {% if row.product %}
+    <form method="post" action="/tags/{{ tag.id }}/unbind" class="inline" hx-confirm="{{ t('tags.unbind_confirm', code=tag.short_code) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="danger">{{ t("tags.unbind") }}</button>
+    </form>
+    {% endif %}
+  {% endif %}
+</section>
+</div>
+
+<section class="card" aria-labelledby="jobs-h">
+  <h2 id="jobs-h">{{ t("tags.jobs.title") }}</h2>
+  {% if jobs %}
+  <div class="table-wrap"><table>
+    <thead><tr>
+      <th scope="col">{{ t("tags.jobs.created") }}</th>
+      <th scope="col">{{ t("tags.jobs.state") }}</th>
+      <th scope="col" class="num">{{ t("tags.jobs.attempts") }}</th>
+      <th scope="col">{{ t("tags.jobs.next_attempt") }}</th>
+      <th scope="col">{{ t("tags.jobs.error") }}</th>
+    </tr></thead>
+    <tbody>
+    {% for job in jobs %}
+      <tr>
+        <td>{{ job.created_at | datetime_el }}</td>
+        <td>{{ t("job.state." + job.state) }}</td>
+        <td class="num">{{ job.attempts }}</td>
+        <td>{{ job.next_attempt_at | datetime_el if job.next_attempt_at else "" }}</td>
+        <td>{{ t("push_error." + job.error_code) if job.error_code else "" }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <p>{{ t("tags.jobs.none") }}</p>
+  {% endif %}
+</section>
+{% endblock %}

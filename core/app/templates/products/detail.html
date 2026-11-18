@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}{{ product.name }}{% endblock %}
+{% block content %}
+{% macro form_error(name) %}{% if error and error.form == name %}<p class="flash flash-error" role="alert">{{ error.text }}</p>{% endif %}{% endmacro %}
+{% set admin = user.role == "admin" %}
+<p><a href="/products">{{ t("products.back") }}</a></p>
+<h1>{{ product.name }}</h1>
+<p class="sub">
+  <span class="mono">{{ product.ean }}</span>
+  {% if product.brand %} · {{ product.brand }}{% endif %}
+  {% if product.is_rx %} <span class="badge">{{ t("products.rx") }}</span>{% endif %}
+  {% if not product.active %} <span class="badge">{{ t("products.inactive") }}</span>{% endif %}
+  {% if product.manually_changed_at %} <span class="badge">{{ t("products.manual_since", when=product.manually_changed_at | datetime_el) }}</span>{% endif %}
+</p>
+
+<div class="grid">
+<section class="card" aria-labelledby="preview-h">
+  <h2 id="preview-h">{{ t("products.preview.title") }}</h2>
+  {% if not tag_types %}
+    <p>{{ t("products.preview.no_tag_types") }}</p>
+  {% else %}
+    <form method="get" action="/products/{{ product.id }}" class="inline">
+      <label for="tag_type">{{ t("products.preview.tag_type") }}</label>
+      <select id="tag_type" name="tag_type" onchange="this.form.requestSubmit()">
+        {% for tt in tag_types %}
+        <option value="{{ tt.key }}"{% if tt.id == tag_type.id %} selected{% endif %}>{{ tt.key }} ({{ tt.width }}×{{ tt.height }}, {{ tt.palette }})</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="secondary">{{ t("products.preview.show") }}</button>
+    </form>
+    {% if preview.digest %}
+      <p class="sub">{{ t("products.preview.template", template=t("template." + preview.template.value)) }}</p>
+      <img class="label-preview" id="label-preview" width="{{ tag_type.width * 3 }}" height="{{ tag_type.height * 3 }}"
+           src="/products/{{ product.id }}/preview.png?tag_type={{ tag_type.key | urlencode }}&amp;v={{ preview.digest }}"
+           alt="{{ t('products.preview.alt', name=product.name) }}">
+      {% if preview.refusal %}<p class="flash flash-warning">{{ t("products.preview.promo_not_shown", reason=t("promo.refusal." + preview.refusal)) }}</p>{% endif %}
+    {% elif preview.refusal %}
+      <p class="flash flash-warning">{{ t("promo.refusal." + preview.refusal) }}</p>
+    {% else %}
+      <p class="flash flash-warning">{{ t(preview.error) }}</p>
+    {% endif %}
+  {% endif %}
+  {% if tags %}
+    <p>{{ t("products.tags.bound") }}
+    {% for tag in tags %}<a class="mono" href="/tags/{{ tag.tag_id }}">{{ tag.short_code }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  {% else %}
+    <p class="sub">{{ t("products.tags.none") }}</p>
+  {% endif %}
+</section>
+
+<section class="card" aria-labelledby="price-h">
+  <h2 id="price-h">{{ t("products.price.title") }}</h2>
+  {% if price %}
+    <p class="big">{{ price.regular_cents | money }}</p>
+  {% else %}
+    <p>{{ t("products.no_price") }}</p>
+  {% endif %}
+  {% if admin %}
+  {{ form_error("price") }}
+  <form method="post" action="/products/{{ product.id }}/price" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="regular_price">{{ t("products.price.new") }}</label>
+    <input id="regular_price" name="regular_price" inputmode="decimal" required autocomplete="off"
+           value="{{ values.get('regular_price', price.regular_cents | cents_input if price else '') }}">
+    <button type="submit">{{ t("products.price.save") }}</button>
+  </form>
+  <p class="hint">{{ t("products.price.hint") }}</p>
+  {% endif %}
+</section>
+
+<section class="card" aria-labelledby="promo-h">
+  <h2 id="promo-h">{{ t("products.promo.title") }}</h2>
+  {% if promo and promo.has_promo %}
+    <p>{{ t("products.promo.current", price=promo.cents | money, start=promo.start | date_el, last=promo.last_day | date_el) }}
+      {% if promo.running %}<span class="badge promo">{{ t("products.promo.running") }}</span>{% else %}<span class="badge">{{ t("products.promo.scheduled") }}</span>{% endif %}</p>
+    {% if promo.prior_cents is not none %}<p class="sub">{{ t("products.promo.prior_stored", price=promo.prior_cents | money) }}</p>{% endif %}
+  {% else %}
+    <p class="sub">{{ t("products.promo.none") }}</p>
+  {% endif %}
+  {% if product.is_rx %}
+    <p class="flash flash-info">{{ t("products.promo.rx_not_allowed") }}</p>
+  {% elif admin and price %}
+  {{ form_error("promo") }}
+  <form method="post" action="/products/{{ product.id }}/promo" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="promo_price">{{ t("products.promo.price") }}</label>
+    <input id="promo_price" name="promo_price" inputmode="decimal" required autocomplete="off"
+           value="{{ values.get('promo_price', promo.cents | cents_input) }}">
+    <label for="start">{{ t("products.promo.start") }}</label>
+    <input id="start" name="start" type="date" min="{{ promo.today | date_input }}"
+           value="{{ values.get('start', (promo.start or promo.today) | date_input) }}">
+    <p class="hint">{{ t("products.promo.start_hint") }}</p>
+    <label for="last">{{ t("products.promo.last_day") }}</label>
+    <input id="last" name="last" type="date" required min="{{ promo.today | date_input }}"
+           value="{{ values.get('last', promo.last_day | date_input) }}">
+    <label for="prior_price">{{ t("products.promo.prior") }}</label>
+    <input id="prior_price" name="prior_price" inputmode="decimal" autocomplete="off"
+           value="{{ values.get('prior_price', promo.prior_cents | cents_input) }}">
+    <p class="hint">{{ t("products.promo.prior_hint") }}</p>
+    <button type="submit">{{ t("products.promo.save") }}</button>
+  </form>
+  {% if promo.has_promo %}
+  <form method="post" action="/products/{{ product.id }}/promo/end" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="danger">{{ t("products.promo.end_now") }}</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</section>
+
+<section class="card" aria-labelledby="fields-h">
+  <h2 id="fields-h">{{ t("products.fields.title") }}</h2>
+  {% if admin %}
+  {{ form_error("fields") }}
+  <form method="post" action="/products/{{ product.id }}/fields" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="name">{{ t("products.fields.name") }}</label>
+    <input id="name" name="name" required maxlength="300" value="{{ values.get('name', product.name) }}">
+    <label for="brand">{{ t("products.fields.brand") }}</label>
+    <input id="brand" name="brand" maxlength="200" value="{{ values.get('brand', product.brand or '') }}">
+    <div class="row">
+      <div>
+        <label for="pack_qty">{{ t("products.fields.pack_qty") }}</label>
+        <input id="pack_qty" name="pack_qty" inputmode="decimal" value="{{ values.get('pack_qty', product.pack_qty_milli | milli_input) }}">
+      </div>
+      <div>
+        <label for="pack_unit">{{ t("products.fields.pack_unit") }}</label>
+        {% set unit_value = values.get('pack_unit', product.pack_unit or '') %}
+        <select id="pack_unit" name="pack_unit">
+          <option value="">{{ t("products.fields.no_unit") }}</option>
+          {% for unit in units %}<option value="{{ unit }}"{% if unit == unit_value %} selected{% endif %}>{{ t("unit." + unit) }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" name="unit_price_required" value="true"{% if product.unit_price_required %} checked{% endif %}> {{ t("products.fields.unit_price_required") }}</label>
+    <label class="check"><input type="checkbox" name="is_rx" value="true"{% if product.is_rx %} checked{% endif %}> {{ t("products.fields.is_rx") }}</label>
+    <label class="check"><input type="checkbox" name="active" value="true"{% if product.active %} checked{% endif %}> {{ t("products.fields.active") }}</label>
+    <p class="hint">{{ t("products.fields.rx_hint") }}</p>
+    <button type="submit">{{ t("products.fields.save") }}</button>
+  </form>
+  {% else %}
+  <dl>
+    <dt>{{ t("products.fields.pack") }}</dt><dd>{{ product | pack_size or t("products.fields.none") }}</dd>
+    <dt>{{ t("products.fields.unit_price_required") }}</dt><dd>{{ t("common.yes") if product.unit_price_required else t("common.no") }}</dd>
+  </dl>
+  {% endif %}
+</section>
+</div>
+
+<section class="card" aria-labelledby="history-h">
+  <h2 id="history-h">{{ t("products.history.title") }}</h2>
+  {% if history %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr>
+      <th scope="col">{{ t("products.history.valid_from") }}</th>
+      <th scope="col" class="num">{{ t("products.history.price") }}</th>
+      <th scope="col">{{ t("products.history.kind") }}</th>
+      <th scope="col">{{ t("products.history.source") }}</th>
+      <th scope="col">{{ t("products.history.recorded") }}</th>
+    </tr></thead>
+    <tbody>
+    {% for row in history %}
+      <tr>
+        <td>{{ row.valid_from | datetime_el }}</td>
+        <td class="num">{{ row.effective_cents | money }}</td>
+        <td>{{ t("history.kind." + row.kind) }}</td>
+        <td>{{ t("history.source." + row.source) }}</td>
+        <td class="sub">{{ row.created_at | datetime_el }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="hint">{{ t("products.history.hint") }}</p>
+  {% else %}
+  <p>{{ t("products.history.none") }}</p>
+  {% endif %}
+</section>
+{% endblock %}
