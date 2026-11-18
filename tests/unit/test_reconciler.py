@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -283,3 +284,53 @@ def test_admin_retry_checks_its_inputs() -> None:
         admin_retry(tag, other_tag, None, NOW)
     dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS)
     assert admin_retry(TagSnapshot(10, None, OLD), dead, None, NOW) == []
+
+
+# What each transition keeps or clears of gateway_id, error_code and error.
+
+FAILED_BY_GW3: dict[str, Any] = dict(gateway_id=3, error_code=PushErrorCode.NOT_FOUND, error="gone")
+
+
+def test_claim_sets_new_gateway_and_clears_last_error() -> None:
+    queued = _job(JobState.QUEUED, attempts=2, **FAILED_BY_GW3)
+    t = claim(queued, gateway_id=4, now=NOW)
+    assert (t.gateway_id, t.error_code, t.error) == (4, None, None)
+
+
+def test_ack_keeps_gateway_and_clears_errors() -> None:
+    job = _job(JobState.CLAIMED, attempts=1, claimed_at=NOW, gateway_id=3)
+    t = apply_result(job, 1, JobOutcome.ACKED, None, NOW)
+    assert (t.gateway_id, t.error_code, t.error) == (3, None, None)
+
+
+@pytest.mark.parametrize("attempts", [1, MAX_ATTEMPTS], ids=["failed", "dead"])
+def test_failure_keeps_gateway_and_records_new_error(attempts: int) -> None:
+    job = _job(JobState.CLAIMED, attempts=attempts, claimed_at=NOW, gateway_id=3)
+    t = apply_result(job, attempts, JobOutcome.FAILED, PushErrorCode.PROTOCOL, NOW, error="bad")
+    assert (t.gateway_id, t.error_code, t.error) == (3, PushErrorCode.PROTOCOL, "bad")
+
+
+def test_due_retry_keeps_last_error_and_clears_gateway() -> None:
+    from core.domain.reconciler import due_retries
+
+    failed = _job(JobState.FAILED, attempts=2, next_attempt_at=NOW, claimed_at=NOW, **FAILED_BY_GW3)
+    [t] = due_retries([failed], NOW)
+    assert (t.state, t.gateway_id, t.claimed_at) == (JobState.QUEUED, None, None)
+    assert (t.error_code, t.error) == (PushErrorCode.NOT_FOUND, "gone")
+
+
+@pytest.mark.parametrize("attempts", [1, MAX_ATTEMPTS], ids=["queued", "dead"])
+def test_stale_claim_clears_gateway_and_sets_timeout(attempts: int) -> None:
+    from core.domain.reconciler import CLAIM_TIMEOUT, STALE_CLAIM_ERROR
+
+    stale = _job(
+        JobState.CLAIMED, attempts=attempts, claimed_at=NOW - CLAIM_TIMEOUT, **FAILED_BY_GW3
+    )
+    [t] = reclaim_stale([stale], NOW)
+    assert (t.gateway_id, t.error_code, t.error) == (None, PushErrorCode.TIMEOUT, STALE_CLAIM_ERROR)
+
+
+def test_admin_retry_creates_a_job_without_gateway_or_error() -> None:
+    dead = _job(JobState.DEAD, NEW, attempts=MAX_ATTEMPTS, **FAILED_BY_GW3)
+    # CreateJob has no gateway or error fields: the new job starts clean.
+    assert admin_retry(TagSnapshot(10, NEW, OLD), dead, None, NOW) == [CreateJob(10, NEW)]

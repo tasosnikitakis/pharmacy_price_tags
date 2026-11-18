@@ -62,6 +62,9 @@ def job_snapshot(row: UpdateJob) -> JobSnapshot:
         next_attempt_at=row.next_attempt_at,
         claimed_at=row.claimed_at,
         created_at=row.created_at,
+        gateway_id=row.gateway_id,
+        error_code=PushErrorCode(row.error_code) if row.error_code is not None else None,
+        error=row.error,
     )
 
 
@@ -298,7 +301,7 @@ def report_result(
     [tag] = _lock_tags(session, [tag_id], skip_locked=False)
     job = session.scalars(select(UpdateJob).where(UpdateJob.id == job_id).with_for_update()).one()
     snapshot = job_snapshot(job)
-    if snapshot.state is JobState.CLAIMED and job.gateway_id not in (None, gateway_id):
+    if snapshot.state is JobState.CLAIMED and snapshot.gateway_id not in (None, gateway_id):
         raise StaleResult(f"job {job_id} is claimed by another gateway")
     t = apply_result(snapshot, attempt, outcome, error_code, now, error=error)
     _write(job, t, now)

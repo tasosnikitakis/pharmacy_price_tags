@@ -266,7 +266,7 @@ def apply_result(
             attempts=job.attempts,
             next_attempt_at=None,
             claimed_at=job.claimed_at,
-            gateway_id=None,
+            gateway_id=job.gateway_id,
             error_code=None,
             error=None,
             set_displayed_hash=job.render_hash,
@@ -280,7 +280,7 @@ def apply_result(
         attempts=job.attempts,
         next_attempt_at=retry_at,
         claimed_at=job.claimed_at,
-        gateway_id=None,
+        gateway_id=job.gateway_id,
         error_code=error_code,
         error=error,
         displayed_hash_unknown=error_code in _MAY_HAVE_LANDED,
@@ -314,8 +314,8 @@ def due_retries(jobs: Sequence[JobSnapshot], now: datetime) -> list[JobTransitio
             next_attempt_at=None,
             claimed_at=None,
             gateway_id=None,
-            error_code=None,
-            error=None,
+            error_code=job.error_code,
+            error=job.error,
         )
         for job in jobs
         if job.state is JobState.FAILED

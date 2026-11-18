@@ -433,3 +433,51 @@ def test_real_pipeline_renders_unassigned_and_bound_labels(db: Session, world: W
     bind(db, world, tag.id, world.products[0], T0)
     refresh_desired_hashes(db, real_label_pipeline, T0, tag_ids=[tag.id])
     assert tag.desired_hash not in (None, unassigned)
+
+
+# gateway_id and the last error on the database rows.
+
+
+def test_job_snapshot_loads_gateway_and_last_error(
+    client: TestClient, db: Session, world: World
+) -> None:
+    from core.services.queue import job_snapshot
+    from shared.gateway_api import PushErrorCode
+
+    [tag] = _discover(client, db, world, "F1")
+    [job] = _claim(client)
+    _result(client, job, "failed", "not_found")
+    [row] = _jobs(db, tag.id)
+    gateway_id = db.scalars(select(GatewayRow.id).order_by(GatewayRow.id)).first()
+    snap = job_snapshot(row)
+    assert (snap.gateway_id, snap.error_code) == (gateway_id, PushErrorCode.NOT_FOUND)
+
+
+def test_finished_jobs_keep_the_gateway_that_pushed_them(
+    client: TestClient, db: Session, world: World
+) -> None:
+    gateway_id = db.scalars(select(GatewayRow.id).order_by(GatewayRow.id)).first()
+    tags = _discover(client, db, world, "F1", "F2")
+    first, second = _claim(client)
+    _result(client, first)
+    _result(client, second, "failed", "rejected")
+    rows = [_jobs(db, t.id)[0] for t in tags]
+    assert {(r.state, r.gateway_id) for r in rows} == {
+        ("acked", gateway_id),
+        ("failed", gateway_id),
+    }
+
+
+def test_due_retry_keeps_the_last_error_on_the_row(
+    client: TestClient, db: Session, world: World, clock: Clock
+) -> None:
+    """The retry is re-queued and claimed in one call; the claim then clears the error,
+    so check the queued state through the service directly."""
+    from core.services.queue import _due_retry_jobs
+
+    [tag] = _discover(client, db, world, "F1")
+    _result(client, _claim(client)[0], "failed", "not_found")
+    clock.now = T0 + BACKOFF[0]
+    _due_retry_jobs(db, clock.now)
+    [row] = _jobs(db, tag.id)
+    assert (row.state, row.gateway_id, row.error_code) == ("queued", None, "not_found")
