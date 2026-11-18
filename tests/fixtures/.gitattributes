@@ -1,0 +1,2 @@
+# Keep CSV fixtures byte-for-byte (encoding and CRLF are what the tests check).
+*.csv -text
