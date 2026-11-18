@@ -46,7 +46,6 @@ NOW = datetime(2026, 11, 18, 10, 0, tzinfo=UTC)
         ("12,90 €", 1290),
         ("€12,90", 1290),
         ("1.290,50", 129050),
-        ("1,290.50", 129050),
         ("1.234.567,89", 123456789),
         ("12 ,90", 1290),
         ("+3,15", 315),
@@ -79,6 +78,10 @@ def test_parse_price_cents(text: str, cents: int) -> None:
         ("1.2.3,00", "thousands"),
         ("12.34,5,6", "not a number"),
         ("1e3", "not a number"),
+        ("1,290.50", "English number format; use Greek order 1.290,50"),
+        ("1,234,567.89", "English number format"),
+        ("0.290,50", "leading zero before a thousands separator"),
+        ("00.290,50", "leading zero before a thousands separator"),
         ("１２,90", "not a number"),  # fullwidth digits
         ("12,９０", "not a number"),
         ("١٢,٩٠", "not a number"),  # Arabic-Indic digits
@@ -139,6 +142,8 @@ def test_parse_pack_empty_quantity_is_no_pack() -> None:
         ("200", "οκάδες", "unknown pack unit"),
         ("0,0005", "g", "more precise"),
         ("1.000", "ml", "ambiguous"),
+        ("1,000.5", "ml", "English number format"),
+        ("0.100,5", "ml", "leading zero"),
         ("200 ml", "g", "disagrees"),
         ("3000000", "kg", "too large"),
         ("２００", "ml", "not a number"),  # fullwidth digits
@@ -205,7 +210,6 @@ def test_normalise_ean_accepts_ean13_and_ean8_as_text() -> None:
     assert normalise_ean("520 1234567894") == "5201234567894"
     assert normalise_ean("2000000000015") == "2000000000015"
     assert normalise_ean("96385074") == "96385074"  # EAN-8
-    assert normalise_ean("00000000") == "00000000"
 
 
 @pytest.mark.parametrize(
@@ -222,6 +226,9 @@ def test_normalise_ean_accepts_ean13_and_ean8_as_text() -> None:
         ("5201234567890", "check digit is 0, expected 4"),
         ("5901234123450", "check digit is 0, expected 7"),
         ("96385070", "check digit is 0, expected 4"),
+        ("00000000", "all-zero code, probably no barcode"),
+        ("0000000000000", "all-zero code, probably no barcode"),
+        ("0000 0000", "all-zero code"),
         ("52012345678AB", "not an EAN; internal codes are not supported yet"),
         ("ΦΑΡ-10023", "not an EAN; internal codes are not supported yet"),
         ("1234567", "not an EAN; internal codes"),

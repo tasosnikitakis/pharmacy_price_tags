@@ -228,7 +228,16 @@ def test_settings_refuse_bad_percents(field: str, value: object) -> None:
         Settings(**_SECRETS, **{field: value})  # type: ignore[arg-type]
 
 
-def test_settings_refuse_float_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PRICE_JUMP_BANNER_PERCENT", "20.5")
-    with pytest.raises(ValidationError, match="price_jump_banner_percent"):
+@pytest.mark.parametrize("text", ["20.5", "50.0", "5e1", "٥٠", "", " ", "50%"])
+def test_settings_refuse_non_integer_from_environment(
+    monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    monkeypatch.setenv("PRICE_JUMP_WARN_PERCENT", text)
+    with pytest.raises(ValidationError, match="price_jump_warn_percent"):
         Settings(**_SECRETS)  # type: ignore[arg-type]
+
+
+def test_settings_accept_plain_integer_strings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRICE_JUMP_WARN_PERCENT", " 75 ")
+    monkeypatch.setenv("PRICE_JUMP_BANNER_PERCENT", "+30")
+    assert jump_thresholds(Settings(**_SECRETS)) == JumpThresholds(75, 30)  # type: ignore[arg-type]

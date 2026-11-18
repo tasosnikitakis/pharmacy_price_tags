@@ -42,23 +42,28 @@ _NUMBER = re.compile(r"^[0-9]+(?:[.,][0-9]+)*$")
 def _split_number(text: str, max_decimals: int, what: str) -> tuple[str, str]:
     """Split a decimal number into integer and fraction digits.
 
-    Accepts a decimal comma (``12,90``) or point (``12.90``), and a thousands
-    separator when both appear (``1.290,50`` or ``1,290.50``: the last one is the
-    decimal separator). A lone ``.`` followed by exactly three digits (``1.000``) is
-    refused as ambiguous, because Greek exports use ``.`` for thousands.
+    Accepts a decimal comma (``12,90``) or point (``12.90``), and ``.`` as thousands
+    separator together with a decimal comma, in Greek order (``1.290,50``). Refused
+    rather than guessed: English order (``1,290.50``), a thousands group after a
+    leading zero (``0.290,50``), and a lone ``.`` followed by exactly three digits
+    (``1.000``), which is ambiguous because Greek exports use ``.`` for thousands.
     """
     if not _NUMBER.match(text):
         raise CellError(f"{what} is not a number: {text!r}")
     commas, dots = text.count(","), text.count(".")
     if commas and dots:
-        decimal = "," if text.rfind(",") > text.rfind(".") else "."
-        thousands = "." if decimal == "," else ","
-        if text.count(decimal) > 1:
+        if text.rfind(".") > text.rfind(","):
+            raise CellError(
+                f"{what} is in English number format; use Greek order 1.290,50: {text!r}"
+            )
+        if commas > 1:
             raise CellError(f"{what} is not a number: {text!r}")
-        whole, frac = text.split(decimal)
-        groups = whole.split(thousands)
+        whole, frac = text.split(",")
+        groups = whole.split(".")
         if not 1 <= len(groups[0]) <= 3 or any(len(g) != 3 for g in groups[1:]):
             raise CellError(f"{what} has misplaced thousands separators: {text!r}")
+        if groups[0].startswith("0"):
+            raise CellError(f"{what} has a leading zero before a thousands separator: {text!r}")
         whole = "".join(groups)
     elif commas or dots:
         sep = "," if commas else "."
@@ -208,6 +213,9 @@ def normalise_ean(text: str) -> str:
         raise CellError(f"12 digits (UPC-A?): not padded; use the full EAN-13: {cleaned!r}")
     if len(cleaned) not in EAN_LENGTHS:
         raise CellError(f"{len(cleaned)} digits: an EAN has 8 or 13 digits: {cleaned!r}")
+    if not cleaned.strip("0"):
+        # Valid by the check digit, but an ERP writes it for "no barcode".
+        raise CellError(f"all-zero code, probably no barcode: {cleaned!r}")
     expected = ean_check_digit(cleaned[:-1])
     if int(cleaned[-1]) != expected:
         raise CellError(f"check digit is {cleaned[-1]}, expected {expected}: {cleaned!r}")

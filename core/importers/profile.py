@@ -122,7 +122,8 @@ def column_positions(table: Table, settings: ImportSettings) -> dict[Column, int
     return {column: positions[_key(h)][0] for column, h in settings.mapping.items()}
 
 
-_BARE_INTEGER = re.compile(r"^[0-9]+$")
+#: The integer part a split price leaves: ``12`` or, Greek-grouped, ``1.290``.
+_INTEGER_PART = re.compile(r"^(?:[0-9]+|[0-9]{1,3}(?:\.[0-9]{3})+)$")
 _ONE_OR_TWO_DIGITS = re.compile(r"^[0-9]{1,2}$")
 
 
@@ -142,8 +143,9 @@ def _split_decimal_comma(
     """True when a ``,``-delimited row shows the trace of an unquoted ``12,90``.
 
     All must hold: the price cell and the next cell were both unquoted in the file;
-    the price is a bare integer and the next cell has 1 or 2 digits; and either the
-    row has exactly one cell more than the header (the split added it), or the next
+    the price is an integer part (``12``, or Greek-grouped ``1.290``) and the next cell
+    has 1 or 2 digits; and either the row has exactly one cell more than the header
+    (the split added it), or the next
     column is unnamed in the header (a trailing delimiter) or mapped to a text field
     (``name`` or ``brand``). A quoted ``"15","30"``, or a VAT or pack column holding
     ``24`` after the price in a row of the header's width, is a valid row.
@@ -151,7 +153,7 @@ def _split_decimal_comma(
     after = price_index + 1
     if after >= len(cells) or quoted[price_index] or quoted[after]:
         return False
-    if not (_BARE_INTEGER.match(cells[price_index].strip()) and
+    if not (_INTEGER_PART.match(cells[price_index].strip()) and
             _ONE_OR_TWO_DIGITS.match(cells[after].strip())):  # fmt: skip
         return False
     return len(cells) == width + 1 or next_header == "" or next_column in _TEXT_COLUMNS
@@ -165,11 +167,13 @@ def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
     rows never raise: those rows are rejected with a reason, including every row of a
     duplicate EAN.
 
-    In a ``,``-delimited file an unquoted decimal comma silently shifts columns. There
-    a row is rejected when its cell count differs from the header's, and the whole
-    file is refused when any row looks like a split price (``_split_decimal_comma``):
-    another row of the same export may have lost a trailing cell, kept the header's
-    width and so look valid, so no row of that file can be trusted.
+    In a ``,``-delimited file an unquoted decimal comma silently shifts columns, and
+    a row that also lost a trailing cell keeps the header's width and looks valid. So
+    the whole file is refused when any row looks like a split price
+    (``_split_decimal_comma``) or any row's cell count differs from the header's: no
+    row of that export can be trusted. The one case left undetected is a file in
+    which every split row also lost a trailing cell. In ``;`` and tab files a row of
+    the wrong width is only rejected on its own.
     """
     table = read_table(data, settings.encoding, settings.delimiter)
     positions = column_positions(table, settings)
@@ -189,10 +193,14 @@ def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
                 f"line {line}: prices look like unquoted decimal commas ({fragment}); "
                 "re-export with quoted prices or a ';' delimiter"
             )
-        # With ',' an unquoted decimal comma ("12,90") splits the price into two cells
-        # and shifts every column after it, so any width mismatch is suspect.
+        if comma and len(cells) != width:
+            raise ImportFormatError(
+                f"line {line} has {len(cells)} cells but the header has {width}; in "
+                "comma-delimited files this usually means unquoted decimal commas. "
+                "Re-export with quoted prices or a ';' delimiter"
+            )
         too_long = len(cells) > width and any(c.strip() for c in cells[width:])
-        if too_long or (comma and len(cells) != width):
+        if too_long:
             parsed.append(
                 RejectedRow(line, f"row has {len(cells)} cells but the header has {width}")
             )

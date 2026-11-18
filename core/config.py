@@ -202,9 +202,14 @@ class Settings(DatabaseSettings):
     @field_validator("price_jump_warn_percent", "price_jump_banner_percent", mode="before")
     @classmethod
     def _whole_percent(cls, value: object) -> object:
-        """Whole percents only: refuse floats (even ``50.0``) and booleans."""
+        """Whole percents only: refuse floats and booleans, and strings that are not
+        plain integers (``"50.0"``, ``"50.5"`` or ``"5e1"`` from the environment)."""
         if isinstance(value, bool | float):
             raise ValueError("must be a whole number of percent")
+        if isinstance(value, str):
+            digits = value.strip().removeprefix("-").removeprefix("+")
+            if not (digits.isascii() and digits.isdecimal()):
+                raise ValueError("must be a whole number of percent")
         return value
 
 

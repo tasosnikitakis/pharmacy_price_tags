@@ -325,7 +325,7 @@ def _lock_price(session: Session, product_id: int, store_id: int) -> Price | Non
     return session.scalar(
         select(Price)
         .where(Price.product_id == product_id, Price.store_id == store_id)
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
 
@@ -334,7 +334,7 @@ def _lock_product(session: Session, product_id: int, store_id: int) -> Product:
     product = session.scalar(
         select(Product)
         .where(Product.id == product_id, Product.store_id == store_id)
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
     if product is None:
@@ -351,7 +351,25 @@ def _lock_products(
         query = query.where(Product.id.in_(product_ids))
     return list(
         session.scalars(
-            query.order_by(Product.id).with_for_update().execution_options(populate_existing=True)
+            query.order_by(Product.id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
+        )
+    )
+
+
+def _lock_prices(
+    session: Session, store_id: int, product_ids: Sequence[int] | None = None
+) -> list[Price]:
+    """Lock the store's price rows (or the given products') in product id order."""
+    query = select(Price).where(Price.store_id == store_id)
+    if product_ids is not None:
+        query = query.where(Price.product_id.in_(product_ids))
+    return list(
+        session.scalars(
+            query.order_by(Price.product_id)
+            .with_for_update(key_share=True)
+            .execution_options(populate_existing=True)
         )
     )
 
@@ -440,20 +458,19 @@ def apply_import(
     parsed = _parse(data, profile)
     with session.begin_nested():
         # Lock order, the same in every writer: store (imports only), then products,
-        # then prices. The store row serialises imports, so two imports cannot both
-        # create the same new EAN. Edits lock their product before its price, so a
-        # product without a price row cannot get one behind the import's back (and
-        # vice versa): whoever comes second waits, then reads the committed row.
-        session.execute(select(Store.id).where(Store.id == store_id).with_for_update())
-        products = {p.id: p for p in _lock_products(session, store_id)}
-        locked = session.scalars(
-            select(Price)
-            .where(Price.store_id == store_id)
-            .order_by(Price.product_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+        # then prices, all FOR NO KEY UPDATE (key_share=True). The store row serialises
+        # imports, so two imports cannot both create the same new EAN; NO KEY UPDATE
+        # does not conflict with the FOR KEY SHARE that every insert referencing the
+        # store (history, events) takes, so an edit that already holds a product lock
+        # can finish its inserts while this import waits for that product, instead of
+        # deadlocking. Edits lock their product before its price, so a product without
+        # a price row cannot get one behind the import's back (and vice versa): whoever
+        # comes second waits, then reads the committed row.
+        session.execute(
+            select(Store.id).where(Store.id == store_id).with_for_update(key_share=True)
         )
-        prices = {price.product_id: price for price in locked}
+        products = {p.id: p for p in _lock_products(session, store_id)}
+        prices = {price.product_id: price for price in _lock_prices(session, store_id)}
         catalogue = catalogue_entries(session, store_id)
         diff = build_diff(parsed.rows, parsed.rejected, catalogue, thresholds)
         if diff.suspicious and not confirm_price_jumps:
@@ -463,10 +480,12 @@ def apply_import(
             raise ImportConfirmationRequired(diff.price_jumps, price_changes, thresholds)
         matched = [*diff.changed, *diff.unchanged]
         # Under READ COMMITTED a product committed while this import waited for a lock
-        # is visible to the diff but was not in the locked set; lock those too.
+        # is visible to the diff but was not in the locked set; lock those products and
+        # their price rows too, so an existing price row is updated, never duplicated.
         late = [e.product_id for e in matched if e.product_id and e.product_id not in products]
         if late:
             products.update((p.id, p) for p in _lock_products(session, store_id, late))
+            prices.update((r.product_id, r) for r in _lock_prices(session, store_id, late))
         run = ImportRun(
             store_id=store_id,
             profile_id=profile.id,

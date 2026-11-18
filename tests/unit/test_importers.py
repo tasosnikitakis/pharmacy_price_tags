@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import codecs
+import re
 from pathlib import Path
 
 import pytest
@@ -316,19 +317,93 @@ def test_comma_split_price_rejects_the_whole_file() -> None:
         parse_import(data, ImportSettings.create(mapping))
 
 
-def test_comma_rows_of_another_width_are_rejected() -> None:
+_WIDTH_FILE = (
+    "line {line} has {cells} cells but the header has {width}; in comma-delimited files "
+    "this usually means unquoted decimal commas. Re-export with quoted prices or a ';' "
+    "delimiter"
+)
+
+
+def _width_error(line: int, cells: int, width: int) -> str:
+    return re.escape(_WIDTH_FILE.format(line=line, cells=cells, width=width))
+
+
+@pytest.mark.parametrize(
+    ("row", "cells"),
+    [
+        (b"2000000000015,Aloe,12,Test,extra\n", 5),  # too long, not a split pattern
+        (b"2000000000015,Aloe,8\n", 3),  # too short
+    ],
+)
+def test_comma_row_of_another_width_refuses_the_file(row: bytes, cells: int) -> None:
+    data = b"ean,name,price,brand\n" + row + b'2000000000039,Paste,"3,15",\n'
+    with pytest.raises(ImportFormatError, match=_width_error(2, cells, 4)):
+        parse_import(data, ImportSettings.create(_WITH_BRAND, delimiter=","))
+
+
+_VAT_MAPPING = {"ean": "EAN", "name": "Name", "price": "Price"}
+
+
+def test_comma_split_with_vat_column_refuses_the_file() -> None:
+    # Reviewer's case: Aspirin splits into 6 cells; Depon keeps the width (4) but is
+    # just as split: 15,30 would import as 15,00 with VAT "30".
+    data = b"EAN,Name,Price,VAT\n5901234123457,Aspirin,12,90,24,00\n4006381333931,Depon,15,30\n"
+    with pytest.raises(ImportFormatError, match=_width_error(2, 6, 4)):
+        parse_import(data, ImportSettings.create(_VAT_MAPPING, delimiter=","))
+    with pytest.raises(ImportFormatError, match="unquoted decimal commas"):
+        parse_import(data, ImportSettings.create(_VAT_MAPPING))  # detected delimiter
+
+
+def test_comma_split_grouped_price_refuses_the_file() -> None:
+    # "1.290,50" splits into "1.290" and "50"; the row is one cell too long.
+    data = b"EAN,Name,Price,VAT\n5901234123457,Aspirin,1.290,50,24\n4006381333931,Depon,15,30\n"
+    with pytest.raises(
+        ImportFormatError,
+        match=re.escape("line 2: prices look like unquoted decimal commas (1.290,50)"),
+    ):
+        parse_import(data, ImportSettings.create(_VAT_MAPPING, delimiter=","))
+
+
+def test_comma_split_grouped_price_into_text_column_refuses_the_file() -> None:
+    # Same width as the header, but the fragment lands in the name column.
+    data = b"EAN,Price,Name\n5901234123457,1.290,50\n"
+    with pytest.raises(ImportFormatError, match=re.escape("(1.290,50)")):
+        parse_import(data, ImportSettings.create(_VAT_MAPPING, delimiter=","))
+
+
+def test_comma_file_of_consistent_width_with_quoted_prices_is_accepted() -> None:
     data = (
-        b"ean,name,price,brand\n"
-        b"2000000000015,Aloe,12,Test,extra\n"  # one cell too many, not a split price
-        b"2000000000022,Oil,8\n"  # one cell short
-        b'2000000000039,Paste,"3,15",\n'  # right width, quoted price
+        b"EAN,Name,Price,VAT\n"
+        b'5901234123457,Aspirin,"12,90","24,00"\n'
+        b'4006381333931,Depon,"15,30",24\n'
+        b'2000000000015,Aloe,"1.290,50",13\n'
     )
-    parsed = parse_import(data, ImportSettings.create(_WITH_BRAND, delimiter=","))
-    assert [(r.line, r.reason) for r in parsed.rejected] == [
-        (2, "row has 5 cells but the header has 4"),
-        (3, "row has 3 cells but the header has 4"),
+    parsed = parse_import(data, ImportSettings.create(_VAT_MAPPING))
+    assert parsed.delimiter == "," and parsed.rejected == []
+    assert [(r.ean, r.regular_cents) for r in parsed.rows] == [
+        ("5901234123457", 1290),
+        ("4006381333931", 1530),
+        ("2000000000015", 129_050),
     ]
-    assert [(r.ean, r.regular_cents) for r in parsed.rows] == [("2000000000039", 315)]
+
+
+def test_semicolon_rows_of_another_width_are_rejected_one_by_one() -> None:
+    # The same widths as the comma reproductions: in a ';' file a decimal comma never
+    # splits a cell, so only the too-long row is rejected and the file is not refused.
+    data = (
+        b"EAN;Name;Price;VAT\n"
+        b"5901234123457;Aspirin;12,90;24;00;x\n"
+        b"4006381333931;Depon;15,30\n"  # short: missing trailing cells are empty
+        b"2000000000015;Aloe;8,50;24\n"
+    )
+    parsed = parse_import(data, ImportSettings.create(_VAT_MAPPING, delimiter=";"))
+    assert [(r.line, r.reason) for r in parsed.rejected] == [
+        (2, "row has 6 cells but the header has 4")
+    ]
+    assert [(r.ean, r.regular_cents) for r in parsed.rows] == [
+        ("4006381333931", 1530),
+        ("2000000000015", 850),
+    ]
 
 
 def test_comma_unambiguous_prices_are_accepted() -> None:

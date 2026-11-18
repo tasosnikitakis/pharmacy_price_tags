@@ -787,3 +787,85 @@ def test_apply_refuses_with_custom_thresholds(db: Session, profile: ImportProfil
         svc.apply_import(
             db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW, thresholds=strict
         )
+
+
+# --- Locking ----------------------------------------------------------------------------
+
+
+def test_late_product_reuses_its_price_row(
+    db: Session, profile: ImportProfile, fake: FakePricing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A product committed while the import waited for its locks is missing from the
+    first lock pass. Simulate that by hiding it there: the import must lock it and its
+    price row afterwards and update that row, not insert a second one."""
+    late = _seed(db, "2000000000022", "ΈΛΑΙΟ ΣΩΜΑΤΟΣ ΉΠΙΟ", 800)
+    lock_products, lock_prices = svc._lock_products, svc._lock_prices
+    late_calls: list[Sequence[int] | None] = []
+
+    def products(s: Session, store_id: int, ids: Sequence[int] | None = None) -> list[Product]:
+        rows = lock_products(s, store_id, ids)
+        late_calls.append(ids)
+        return rows if ids is not None else [p for p in rows if p.id != late.id]
+
+    def prices(s: Session, store_id: int, ids: Sequence[int] | None = None) -> list[Price]:
+        rows = lock_prices(s, store_id, ids)
+        return rows if ids is not None else [p for p in rows if p.product_id != late.id]
+
+    monkeypatch.setattr(svc, "_lock_products", products)
+    monkeypatch.setattr(svc, "_lock_prices", prices)
+    svc.apply_import(db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW)
+
+    assert late_calls == [None, [late.id]]  # the late path ran
+    call = next(c for c in fake.price_calls if c["product"].product_id == late.id)
+    assert call["old"] == PriceState(800)  # the existing row was found and passed in
+    assert db.scalar(select(func.count()).where(Price.product_id == late.id)) == 1
+    price = db.get(Price, late.id)
+    assert price is not None and price.regular_cents == 850
+
+
+# --- Promos carried by an import (real pricing rules) ----------------------------------
+
+
+def test_import_drops_an_expired_promo_silently(db: Session, profile: ImportProfile) -> None:
+    oil = _seed(
+        db, "2000000000022", "ΈΛΑΙΟ ΣΩΜΑΤΟΣ ΉΠΙΟ", 800,
+        promo_cents=700, promo_from=NOW - timedelta(days=20), promo_to=NOW - timedelta(days=1),
+    )  # fmt: skip
+    result = svc.apply_import(db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW)
+    price = db.get(Price, oil.id)
+    assert price is not None
+    assert (price.regular_cents, price.promo_cents, price.promo_from, price.promo_to) == (
+        850, None, None, None
+    )  # fmt: skip
+    # Rule 0: an expired promo is housekeeping, not a refusal.
+    assert result.run.counts["promo_refused"] == 0
+    assert _events(db, "promo.refused") == []
+    last = _history(db, oil.id)[-1]
+    assert (last.effective_cents, last.kind, last.source, last.valid_from) == (
+        850, "regular", "import", NOW
+    )  # fmt: skip
+
+
+def test_import_below_a_running_promo_refuses_the_promo(
+    db: Session, profile: ImportProfile
+) -> None:
+    # Regular 12,00 with a running promo at 9,00 (prior price 12,00 from history). The
+    # file lowers the regular price to 8,50, below the promo: rule 3 removes the promo.
+    oil = _seed(
+        db, "2000000000022", "ΈΛΑΙΟ ΣΩΜΑΤΟΣ ΉΠΙΟ", 1200,
+        promo_cents=900, promo_from=NOW - timedelta(days=1), promo_to=NOW + timedelta(days=9),
+    )  # fmt: skip
+    result = svc.apply_import(db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW)
+    price = db.get(Price, oil.id)
+    assert price is not None
+    assert (price.regular_cents, price.promo_cents, price.promo_from, price.promo_to) == (
+        850, None, None, None
+    )  # fmt: skip
+    assert result.run.counts["promo_refused"] == 1
+    (refused,) = _events(db, "promo.refused")
+    assert refused.payload["product_id"] == oil.id
+    assert refused.payload["reason"] == "not_below_regular"
+    assert [e.kind for e in result.price_events].count("promo.refused") == 1
+    # History never shows the refused promo price from now on.
+    last = _history(db, oil.id)[-1]
+    assert (last.effective_cents, last.kind, last.valid_from) == (850, "regular", NOW)
