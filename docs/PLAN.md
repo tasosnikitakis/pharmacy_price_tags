@@ -277,10 +277,10 @@ The catalogue is the only thing tags render from. CSV import and manual edits ar
 | --- | --- |
 | Price shown with VAT, two decimals and the euro sign | Catalogue prices are VAT-inclusive; format as `12,90 €` |
 | Unit price where required | If `unit_price_required`, compute price per kg, litre or piece from the pack size (`pack_qty_milli`, thousandths of `pack_unit`) and use a unit-price template. Promo labels for such products also show the unit price, computed from the promo price |
-| Unit price at least 70% of the selling price's character size, both bold | Enforced by the template; covered by a test that measures rendered glyph heights |
+| Unit price at least 70% of the selling price's character size, both bold | Enforced by the `unit_price` and `promo` templates; covered by a test that measures rendered glyph heights on both |
 | A discount must show the lowest price of the previous 30 days | Promo templates show a prior price: the lowest price in effect in the 30 days before the promo takes effect (`promo_from`), up to that moment, so a drop earlier the same day counts |
 | A promo must be a real reduction | The promo price must be strictly below both the prior price and the current regular price; otherwise the promo is refused (decision 0009) |
-| Promo start | `promo_from` is a timestamp, not a date. A promo "from today" starts when it is saved; a `promo_from` in the past is refused |
+| Promo start | `promo_from` is a timestamp, not a date. A promo "from today" starts when it is saved; a `promo_from` in the past is refused. A running promo may have its end or price edited without moving its start (decision 0009) |
 | Less than 30 days of history | A promo cannot be activated until an admin enters the prior price by hand. An entered prior price is always accepted and logged, even if unchanged. A stored one is cleared when the promo changes or ends, unless the admin enters one in the same edit |
 | Prescription medicines must not be promoted | Products with `is_rx` cannot be given a promo price or a promo template. Setting `is_rx` ends any active or scheduled promo and writes a history row for it |
 

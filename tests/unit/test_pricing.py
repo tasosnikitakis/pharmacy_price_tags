@@ -302,6 +302,54 @@ def test_promo_label_shows_unit_price_from_promo_price() -> None:
     assert label.unit_price_text == "40,00 €/kg"  # 8,00 € for 200 g
 
 
+def test_import_below_running_promo_removes_it_now() -> None:
+    """Regular 10,00, promo 8,00 running. An import sets regular to 7,90: the promo is
+    no longer below regular, so it ends now and history records the 7,90 on the shelf."""
+    start = T0 - timedelta(days=4)
+    history = [_point(1000, 60), PricePoint(next(_seq), 800, PriceKind.PROMO, start,
+               PriceSource.PROMO)]  # fmt: skip
+    old = PriceState(1000, 800, start, T0 + timedelta(days=10))
+    requested = PriceState(790, 800, start, T0 + timedelta(days=10))
+    change = apply_price_change(_product(), old, requested, history, T0, PriceSource.IMPORT)
+    assert change.state == PriceState(790)
+    assert [(r.effective_cents, r.kind, r.valid_from) for r in change.history_rows] == [
+        (790, PriceKind.REGULAR, T0)
+    ]
+    refused = [e for e in change.events if e.kind == "promo.refused"]
+    assert refused and refused[0].payload["reason"] == PromoRefusal.NOT_BELOW_REGULAR
+
+
+def test_expired_promo_cannot_be_revived_with_its_old_start() -> None:
+    """A promo ran 40 to 30 days ago. Re-saving it with a new end keeps its old start,
+    but it is a new promo now, so the past start is refused."""
+    start, end = T0 - timedelta(days=40), T0 - timedelta(days=30)
+    old = PriceState(1000, 800, start, end)
+    revived = PriceState(1000, 800, start, T0 + timedelta(days=7))
+    with pytest.raises(PromoRefused) as exc:
+        apply_price_change(_product(), old, revived, [_point(1000, 60)], T0,
+                           PriceSource.MANUAL)  # fmt: skip
+    assert exc.value.reason is PromoRefusal.STARTS_IN_PAST
+
+
+def test_ending_a_running_promo_now_removes_it() -> None:
+    start = T0 - timedelta(days=2)
+    old = PriceState(1000, 800, start, T0 + timedelta(days=5))
+    change = apply_price_change(_product(), old, PriceState(1000, 800, start, T0),
+                                [_point(1000, 60)], T0, PriceSource.MANUAL)  # fmt: skip
+    assert change.state == PriceState(1000)
+
+
+def test_re_entering_identical_prior_price_with_no_other_change_is_logged() -> None:
+    week = T0 + timedelta(days=7)
+    old = PriceState(1200, 999, T0, week, promo_prior_cents=1200)
+    change = apply_price_change(
+        _product(), old, PriceState(1200, 999, T0, week), [_point(1200, 10)], T0,
+        PriceSource.MANUAL, entered_prior_cents=1200,
+    )  # fmt: skip
+    assert change.state.promo_prior_cents == 1200
+    assert [e.kind for e in change.events].count("promo.prior_set") == 1
+
+
 def test_next_label_change() -> None:
     price = PriceState(1000, 800, T0, T0 + timedelta(days=7))
     assert next_label_change(price, T0 - timedelta(days=1)) == T0

@@ -18,6 +18,7 @@ removes only trailing newlines, exactly as the Postgres image does, so both alwa
 the same password. A secret with any other leading or trailing whitespace (spaces,
 tabs, a `\r` from a Windows editor) is refused at startup, from a file or from the
 environment, because it is almost certainly a mistake and the two sides could disagree.
+A password embedded in `DATABASE_URL` is not checked: the URL is then the only source.
 SQLAlchemy URL-escapes the password when it renders the URL, so `@`, `/`, `:` and `%`
 are safe. Giving the password both ways is an error.
 

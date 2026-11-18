@@ -16,11 +16,17 @@ manual prior price is higher than today's regular price.
 - `promo_from` is a timestamp. A promo "from today" starts when it is saved, and a
   promo that would start in the past is refused (`STARTS_IN_PAST`). The 30-day window
   ends at the moment the promo takes effect, so a price drop earlier the same day counts.
-- Editing a running promo (lead's reading of the rule above; it covers new promos and a
-  moved start): the past-start check applies only to a new promo or a changed
-  `promo_from`. A running promo may have its end or price edited; it keeps its
-  original `promo_from`, so its prior price is unchanged and the promo's own price
-  never enters its window. Setting `promo_to` to now or earlier ends it.
+- Editing a running promo (lead's reading of the rule above, awaiting Tasos's
+  confirmation): the past-start check is waived only for a promo that is running now
+  and keeps its `promo_from`. Its end or price may be edited; the history-based prior
+  price is unchanged and the promo's own price never enters its window. A manual prior
+  price counts as cleared by the edit, like any promo change, so the admin re-enters it
+  (workstream E pre-fills it). Setting `promo_to` to now or earlier removes the promo.
+  An expired promo cannot be revived this way: carrying it again is a new promo, whose
+  start must not be in the past.
+- Every write re-validates every running or scheduled promo; a promo that has become
+  unlawful (for example an import lowered the regular price below it) is removed at
+  that moment and logged as `promo.refused`.
 - A manual prior price an admin enters is always accepted and logged
   (`promo.prior_set`), even when it equals the stored one.
 - Setting `is_rx` on a product ends any active or scheduled promo and writes a history

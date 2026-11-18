@@ -100,7 +100,12 @@ class NewPricePoint:
 
 @dataclass(frozen=True, slots=True)
 class PriceEvent:
-    """An ``event_log`` row a price change must write (kind and payload)."""
+    """An ``event_log`` row a price change must write (kind and payload).
+
+    Payload keys: every event has ``product_id``; ``promo.refused`` has ``reason`` (a
+    ``PromoRefusal``); ``promo.prior_set`` has ``prior_cents`` and the promo's
+    ``promo_cents``, ``promo_from`` and ``promo_to``.
+    """
 
     # "promo.prior_set", "promo.prior_cleared", "promo.refused", "promo.ended_rx"
     kind: str
@@ -129,13 +134,17 @@ def apply_price_change(
     promo edit. Callers store exactly what it returns, in one transaction, with the
     ``price`` row locked (see ``history_rows_for_change``). Rules, in order:
 
-    1. ``promo_from`` is a timestamp, not a date. A new promo, or one whose
-       ``promo_from`` this request changes, must have ``promo_from >= now`` (a promo
-       "from today" starts when it is saved: the caller passes ``promo_from = now``);
-       otherwise ``STARTS_IN_PAST``. A running promo keeps its ``promo_from`` and may
-       have ``promo_to`` or ``promo_cents`` edited; ``promo_to <= now`` ends it now.
-       Its prior price is still computed for its original ``promo_from``, so extending
-       a promo never pulls the promo's own price into its 30-day window.
+    0. An expired promo in ``old`` (``old.promo_to <= now``) counts as no promo: a
+       request carrying it again is a new promo.
+    1. ``promo_from`` is a timestamp, not a date. Every promo in ``requested`` must
+       have ``promo_from >= now`` (a promo "from today" starts when it is saved: the
+       caller passes ``promo_from = now``), otherwise ``STARTS_IN_PAST``, with one
+       exception: a promo that is running at ``now`` in ``old``
+       (``old.promo_from <= now < old.promo_to``) and keeps the same ``promo_from``
+       may have ``promo_to`` or ``promo_cents`` edited. Its prior price is still
+       computed for its original ``promo_from``, so editing a running promo never pulls
+       its own price into its 30-day window. A ``requested.promo_to <= now`` ends the
+       promo now: it is removed from ``state``.
     2. The manual prior price. ``requested.promo_prior_cents`` is ignored as input.
        ``entered_prior_cents`` is what an admin typed in this request: when given it is
        always accepted and stored, and always logged as ``promo.prior_set`` with the
@@ -143,11 +152,14 @@ def apply_price_change(
        given, the stored ``old.promo_prior_cents`` is kept only while the promo is
        unchanged; if ``promo_cents``, ``promo_from`` or ``promo_to`` change, or the
        promo ends, it is cleared and ``promo.prior_cleared`` is logged.
-    3. A promo that has not started yet is re-validated with ``validate_promo`` against
-       ``history`` plus the rows this change appends. If it would now be refused (say an
-       import lowered the price inside its 30-day window below the promo price), the
-       promo is removed from ``state`` and a ``promo.refused`` event carries the reason.
-       So a refused promo never reaches ``price_history`` as a shelf price.
+    3. Any promo left in ``state``, running or scheduled, is re-validated with
+       ``validate_promo`` against ``history`` plus the rows this change appends. This
+       covers changes the request did not make to the promo itself, such as an import
+       that lowers ``regular_cents`` below a running promo price (``NOT_BELOW_REGULAR``)
+       or lowers the 30-day low before a scheduled promo (``NOT_A_DISCOUNT``). If it is
+       refused, the promo is removed from ``state`` at ``now`` and a ``promo.refused``
+       event carries the reason. So a refused promo never reaches ``price_history`` as a
+       shelf price.
     4. ``history_rows`` come from ``history_rows_for_change(state, now, source)``.
 
     Raises ``PromoRefused`` when ``requested`` itself adds or changes a promo that
@@ -174,7 +186,8 @@ def apply_product_change(
     history gets a ``regular`` row at ``now`` with source ``manual`` (only a person
     sets ``is_rx``), and ``promo.ended_rx`` is logged, plus ``promo.prior_cleared``
     if a manual prior price is dropped. A scheduled promo ends too: an Rx product may
-    not carry one at all. Returns ``None`` when the edit changes nothing about the price. The caller
+    not carry one at all. Returns ``None`` when the edit changes nothing about the
+    price; an already expired promo is not cleared by this function. The caller
     stores the result exactly as for ``apply_price_change``, in the same transaction
     as the product update, with the ``price`` row locked.
     """
