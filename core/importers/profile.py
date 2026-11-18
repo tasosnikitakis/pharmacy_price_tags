@@ -1,0 +1,134 @@
+"""Import profiles: a saved column mapping plus file settings (section 6, step 1).
+
+A profile maps the logical columns of ``core.domain.catalogue.Column`` to header
+names in the ERP's export, e.g. ``{"ean": "Barcode", "name": "Περιγραφή",
+"price": "Λιανική"}``. It is stored as ``import_profile.mapping`` (JSONB), with
+``encoding`` and ``delimiter`` (``None``: detect).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+
+from core.domain.catalogue import (
+    REQUIRED_COLUMNS,
+    Column,
+    ImportRow,
+    RejectedRow,
+    parse_row,
+    reject_duplicates,
+)
+from core.importers.csv_file import (
+    DELIMITERS,
+    ImportFormatError,
+    Table,
+    canonical_encoding,
+    read_table,
+)
+
+
+def _key(header: str) -> str:
+    return " ".join(header.split()).casefold()
+
+
+@dataclass(frozen=True, slots=True)
+class ImportSettings:
+    """Everything needed to read one ERP's export."""
+
+    mapping: dict[Column, str]  # logical column -> header name in the file
+    encoding: str | None = None  # "utf-8" or "cp1253"; None: detect
+    delimiter: str | None = None  # ";", "," or tab; None: detect
+
+    @classmethod
+    def create(
+        cls,
+        mapping: Mapping[str, object],
+        encoding: str | None = None,
+        delimiter: str | None = None,
+    ) -> ImportSettings:
+        """Validate a mapping as stored in ``import_profile.mapping``.
+
+        Raises ``ValueError`` for unknown or missing required columns, empty or
+        repeated header names, or an unsupported encoding or delimiter.
+        """
+        unknown = sorted(set(mapping) - {c.value for c in Column})
+        if unknown:
+            raise ValueError(f"unknown columns in mapping: {', '.join(unknown)}")
+        parsed: dict[Column, str] = {}
+        for column in Column:
+            value = mapping.get(column.value)
+            if value is None or value == "":
+                continue
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"column {column.value!r} must map to a header name")
+            parsed[column] = value.strip()
+        missing = [c.value for c in REQUIRED_COLUMNS if c not in parsed]
+        if missing:
+            raise ValueError(f"mapping lacks required columns: {', '.join(missing)}")
+        headers = [_key(h) for h in parsed.values()]
+        if len(set(headers)) != len(headers):
+            raise ValueError("two columns map to the same header")
+        if encoding is not None:
+            encoding = canonical_encoding(encoding)
+        if delimiter is not None and delimiter not in DELIMITERS:
+            raise ValueError(f"unsupported delimiter {delimiter!r}")
+        return cls(parsed, encoding, delimiter)
+
+    def mapping_json(self) -> dict[str, str]:
+        """The mapping as stored in ``import_profile.mapping``."""
+        return {column.value: header for column, header in self.mapping.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedImport:
+    """A file read with a profile: accepted rows (unique EANs) and rejected ones."""
+
+    encoding: str
+    delimiter: str
+    rows: list[ImportRow]
+    rejected: list[RejectedRow]
+
+
+def column_positions(table: Table, settings: ImportSettings) -> dict[Column, int]:
+    """Find each mapped column in the header (trimmed, case-insensitive).
+
+    Raises ``ImportFormatError`` naming every mapped header the file lacks.
+    """
+    positions: dict[str, int] = {}
+    for index, header in enumerate(table.header):
+        positions.setdefault(_key(header), index)
+    absent = [h for h in settings.mapping.values() if _key(h) not in positions]
+    if absent:
+        found = ", ".join(repr(h) for h in table.header)
+        raise ImportFormatError(
+            f"the file lacks the column(s) {', '.join(repr(h) for h in absent)}; "
+            f"its header is {found}"
+        )
+    return {column: positions[_key(h)] for column, h in settings.mapping.items()}
+
+
+def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
+    """Read file bytes with a profile into accepted and rejected rows.
+
+    Raises ``ImportFormatError`` when the file as a whole cannot be read (encoding,
+    no header, mapped columns absent). Problems with single rows never raise: those
+    rows are rejected with a reason, including every row of a duplicate EAN.
+    """
+    table = read_table(data, settings.encoding, settings.delimiter)
+    positions = column_positions(table, settings)
+    width = len(table.header)
+    parsed: list[ImportRow | RejectedRow] = []
+    for line, cells in table.rows:
+        if len(cells) > width and any(c.strip() for c in cells[width:]):
+            parsed.append(
+                RejectedRow(line, f"row has {len(cells)} cells but the header has {width}")
+            )
+            continue
+        values = {
+            column: (cells[index] if index < len(cells) else "")
+            for column, index in positions.items()
+        }
+        parsed.append(parse_row(line, values))
+    rows, rejected = reject_duplicates(parsed)
+    return ParsedImport(table.encoding, table.delimiter, rows, rejected)

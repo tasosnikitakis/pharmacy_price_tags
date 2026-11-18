@@ -1,0 +1,690 @@
+"""Catalogue writes: import preview and apply, manual price edit, product edit.
+
+Every write to a ``price`` row goes through ``core.domain.pricing.apply_price_change``
+(product edits through ``apply_product_change``) and stores exactly what it returns:
+the new ``price`` row, its ``price_history`` rows and its ``event_log`` rows. Each
+public write function runs in one savepoint inside the caller's transaction, locks the
+``price`` rows it reads (``SELECT ... FOR UPDATE``) and takes ``now`` once, so the
+whole write uses one clock (docs/decisions/0007, 0008). The caller commits.
+
+Products are never deleted: products missing from an import are only listed.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import Enum
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from core.db.models import (
+    DEFAULT_STORE_ID,
+    EventLog,
+    ImportProfile,
+    ImportRun,
+    Price,
+    PriceHistory,
+    Product,
+)
+from core.domain import pricing
+from core.domain.catalogue import CatalogueEntry, DiffEntry, ImportDiff, build_diff
+from core.domain.pricing import PriceChange, PriceEvent
+from core.domain.types import (
+    PackUnit,
+    PriceKind,
+    PricePoint,
+    PriceSource,
+    PriceState,
+    ProductFacts,
+)
+from core.importers.profile import ImportSettings, ParsedImport, parse_import
+
+#: ``event_log.actor`` for writes no person made.
+SYSTEM_ACTOR = "system"
+
+
+class NotFound(LookupError):
+    """The product or profile does not exist in this store."""
+
+
+# --- Conversions ----------------------------------------------------------------------
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _check_now(now: datetime | None) -> datetime:
+    if now is None:
+        return utc_now()
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    return now.astimezone(UTC)
+
+
+def product_facts(product: Product) -> ProductFacts:
+    return ProductFacts(
+        product_id=product.id,
+        ean=product.ean,
+        name=product.name,
+        brand=product.brand,
+        pack_qty_milli=product.pack_qty_milli,
+        pack_unit=PackUnit(product.pack_unit) if product.pack_unit else None,
+        unit_price_required=product.unit_price_required,
+        is_rx=product.is_rx,
+    )
+
+
+def price_state(price: Price) -> PriceState:
+    return PriceState(
+        regular_cents=price.regular_cents,
+        promo_cents=price.promo_cents,
+        promo_from=price.promo_from,
+        promo_to=price.promo_to,
+        promo_prior_cents=price.promo_prior_cents,
+    )
+
+
+def _jsonable(value: Any) -> Any:
+    """Make an event payload storable as JSONB (datetimes as ISO 8601 UTC)."""
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+# --- Reading --------------------------------------------------------------------------
+
+
+def load_history(session: Session, product_ids: Iterable[int]) -> dict[int, list[PricePoint]]:
+    """``price_history`` of the given products as ``PricePoint`` lists, in id order."""
+    ids = sorted(set(product_ids))
+    result: dict[int, list[PricePoint]] = {pid: [] for pid in ids}
+    if not ids:
+        return result
+    rows = session.scalars(
+        select(PriceHistory).where(PriceHistory.product_id.in_(ids)).order_by(PriceHistory.id)
+    )
+    for row in rows:
+        result[row.product_id].append(
+            PricePoint(
+                seq=row.id,
+                effective_cents=row.effective_cents,
+                kind=PriceKind(row.kind),
+                valid_from=row.valid_from,
+                source=PriceSource(row.source),
+            )
+        )
+    return result
+
+
+def catalogue_entries(session: Session, store_id: int = DEFAULT_STORE_ID) -> list[CatalogueEntry]:
+    """Every product of the store with its regular price, for the import diff."""
+    rows = session.execute(
+        select(Product, Price.regular_cents)
+        .outerjoin(Price, Price.product_id == Product.id)
+        .where(Product.store_id == store_id)
+        .order_by(Product.id)
+    )
+    return [
+        CatalogueEntry(
+            product_id=product.id,
+            ean=product.ean,
+            name=product.name,
+            brand=product.brand,
+            pack_qty_milli=product.pack_qty_milli,
+            pack_unit=PackUnit(product.pack_unit) if product.pack_unit else None,
+            regular_cents=regular_cents,
+            manually_changed_at=product.manually_changed_at,
+            active=product.active,
+        )
+        for product, regular_cents in rows
+    ]
+
+
+def last_applied_import_at(session: Session, store_id: int = DEFAULT_STORE_ID) -> datetime | None:
+    """When the last import was applied, for the staleness warning (section 6)."""
+    return session.scalar(
+        select(ImportRun.applied_at)
+        .where(ImportRun.store_id == store_id, ImportRun.applied_at.is_not(None))
+        .order_by(ImportRun.applied_at.desc())
+        .limit(1)
+    )
+
+
+# --- Profiles -------------------------------------------------------------------------
+
+
+def save_profile(
+    session: Session,
+    name: str,
+    settings: ImportSettings,
+    store_id: int = DEFAULT_STORE_ID,
+) -> ImportProfile:
+    """Create the profile ``name``, or replace its mapping and settings."""
+    name = name.strip()
+    if not name:
+        raise ValueError("profile name is empty")
+    profile = get_profile(session, name, store_id)
+    if profile is None:
+        profile = ImportProfile(store_id=store_id, name=name)
+        session.add(profile)
+    profile.mapping = settings.mapping_json()
+    profile.encoding = settings.encoding
+    profile.delimiter = settings.delimiter
+    session.flush()
+    return profile
+
+
+def get_profile(
+    session: Session, name: str, store_id: int = DEFAULT_STORE_ID
+) -> ImportProfile | None:
+    return session.scalar(
+        select(ImportProfile).where(
+            ImportProfile.store_id == store_id, ImportProfile.name == name.strip()
+        )
+    )
+
+
+def list_profiles(session: Session, store_id: int = DEFAULT_STORE_ID) -> list[ImportProfile]:
+    return list(
+        session.scalars(
+            select(ImportProfile)
+            .where(ImportProfile.store_id == store_id)
+            .order_by(ImportProfile.name)
+        )
+    )
+
+
+def profile_settings(profile: ImportProfile) -> ImportSettings:
+    """The validated settings of a stored profile (raises ``ValueError`` if invalid)."""
+    return ImportSettings.create(profile.mapping, profile.encoding, profile.delimiter)
+
+
+# --- Storing one price write ----------------------------------------------------------
+
+
+def _write_events(
+    session: Session,
+    events: Iterable[PriceEvent],
+    actor: str,
+    now: datetime,
+    store_id: int,
+) -> None:
+    for event in events:
+        _log(session, event.kind, event.payload, actor, now, store_id)
+
+
+def _log(
+    session: Session,
+    kind: str,
+    payload: Mapping[str, object],
+    actor: str,
+    now: datetime,
+    store_id: int,
+) -> None:
+    stored = _jsonable(payload)
+    session.add(EventLog(store_id=store_id, at=now, actor=actor, kind=kind, payload=stored))
+
+
+def _store_change(
+    session: Session,
+    product: Product,
+    price: Price | None,
+    change: PriceChange,
+    *,
+    actor: str,
+    now: datetime,
+    import_run_id: int | None = None,
+) -> tuple[Price, list[PricePoint]]:
+    """Store exactly what a pricing call returned; return the price row and the new
+    history as ``PricePoint`` values (with their ids), for a follow-up call."""
+    state = change.state
+    if price is None:
+        price = Price(product_id=product.id, store_id=product.store_id)
+        session.add(price)
+    price.regular_cents = state.regular_cents
+    price.promo_cents = state.promo_cents
+    price.promo_from = state.promo_from
+    price.promo_to = state.promo_to
+    price.promo_prior_cents = state.promo_prior_cents
+    price.updated_at = now
+    rows = [
+        PriceHistory(
+            store_id=product.store_id,
+            product_id=product.id,
+            effective_cents=point.effective_cents,
+            kind=PriceKind(point.kind).value,
+            valid_from=point.valid_from,
+            source=PriceSource(point.source).value,
+            import_run_id=import_run_id,
+            created_at=now,
+        )
+        for point in change.history_rows
+    ]
+    session.add_all(rows)
+    _write_events(session, change.events, actor, now, product.store_id)
+    session.flush()
+    points = [
+        PricePoint(r.id, r.effective_cents, PriceKind(r.kind), r.valid_from, PriceSource(r.source))
+        for r in rows
+    ]
+    return price, points
+
+
+def _lock_price(session: Session, product_id: int) -> Price | None:
+    return session.scalar(
+        select(Price)
+        .where(Price.product_id == product_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _lock_product(session: Session, product_id: int, store_id: int) -> Product:
+    product = session.scalar(
+        select(Product)
+        .where(Product.id == product_id, Product.store_id == store_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if product is None:
+        raise NotFound(f"product {product_id} not found")
+    return product
+
+
+# --- Import ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ImportPreview:
+    """What applying a file would do; nothing is written."""
+
+    filename: str
+    profile_name: str
+    encoding: str
+    delimiter: str
+    diff: ImportDiff
+
+
+@dataclass(frozen=True, slots=True)
+class ImportResult:
+    run: ImportRun
+    diff: ImportDiff
+    # Events from the pricing rules, e.g. ``promo.refused`` when the new regular price
+    # makes a running promo unlawful; shown to the admin after applying.
+    price_events: list[PriceEvent]
+
+
+def _parse(data: bytes, profile: ImportProfile) -> ParsedImport:
+    return parse_import(data, profile_settings(profile))
+
+
+def preview_import(
+    session: Session,
+    data: bytes,
+    filename: str,
+    profile: ImportProfile,
+) -> ImportPreview:
+    """Parse ``data`` with ``profile`` and diff it against the catalogue (section 6,
+    step 3). Raises ``ImportFormatError`` if the file as a whole cannot be read."""
+    parsed = _parse(data, profile)
+    diff = build_diff(parsed.rows, parsed.rejected, catalogue_entries(session, profile.store_id))
+    return ImportPreview(filename, profile.name, parsed.encoding, parsed.delimiter, diff)
+
+
+def apply_import(
+    session: Session,
+    data: bytes,
+    filename: str,
+    profile: ImportProfile,
+    *,
+    actor: str,
+    created_by: int | None = None,
+    now: datetime | None = None,
+) -> ImportResult:
+    """Apply a file in one transaction (section 6, step 4).
+
+    The diff is rebuilt here after locking every ``price`` row of the store, so it
+    reflects the catalogue at the moment of writing. New products are created; changed
+    prices go through ``apply_price_change`` with source ``import`` and the stored
+    promo passed through unchanged; changed product fields go through
+    ``apply_product_change``. Unchanged rows write nothing, so re-importing a file
+    adds no history. The manual-change flag is cleared on every product in the file.
+    Records an ``import_run`` with counts and an ``import.applied`` event.
+    """
+    now = _check_now(now)
+    store_id = profile.store_id
+    parsed = _parse(data, profile)
+    with session.begin_nested():
+        locked = session.scalars(
+            select(Price)
+            .where(Price.store_id == store_id)
+            .order_by(Price.product_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        prices = {price.product_id: price for price in locked}
+        diff = build_diff(parsed.rows, parsed.rejected, catalogue_entries(session, store_id))
+        matched = [*diff.changed, *diff.unchanged]
+        products = {
+            p.id: p
+            for p in session.scalars(
+                select(Product)
+                .where(Product.id.in_([e.product_id for e in matched]))
+                .order_by(Product.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        }
+        run = ImportRun(
+            store_id=store_id,
+            profile_id=profile.id,
+            filename=filename,
+            started_at=now,
+            created_by=created_by,
+        )
+        session.add(run)
+        session.flush()
+
+        price_events: list[PriceEvent] = []
+        for entry in diff.new:
+            price_events += _import_new(session, entry, run, store_id, actor, now)
+        history = load_history(session, [e.product_id for e in diff.changed if e.product_id])
+        for entry in diff.changed:
+            assert entry.product_id is not None
+            product = products[entry.product_id]
+            price_events += _import_changed(
+                session,
+                entry,
+                product,
+                prices.get(product.id),
+                history[product.id],
+                run,
+                actor,
+                now,
+            )
+        for entry in matched:
+            assert entry.product_id is not None
+            products[entry.product_id].manually_changed_at = None
+
+        counts: dict[str, int] = {
+            **diff.counts(),
+            "promo_refused": sum(1 for e in price_events if e.kind == "promo.refused"),
+        }
+        run.counts = counts
+        run.applied_at = now
+        _log(
+            session,
+            "import.applied",
+            {
+                "import_run_id": run.id,
+                "profile": profile.name,
+                "filename": filename,
+                "encoding": parsed.encoding,
+                "delimiter": parsed.delimiter,
+                "counts": counts,
+            },
+            actor,
+            now,
+            store_id,
+        )
+        session.flush()
+    return ImportResult(run, diff, price_events)
+
+
+def _import_new(
+    session: Session,
+    entry: DiffEntry,
+    run: ImportRun,
+    store_id: int,
+    actor: str,
+    now: datetime,
+) -> list[PriceEvent]:
+    row = entry.row
+    product = Product(
+        store_id=store_id,
+        ean=row.ean,
+        name=row.name,
+        brand=row.brand,
+        pack_qty_milli=row.pack_qty_milli,
+        pack_unit=row.pack_unit.value if row.pack_unit else None,
+        unit_price_required=False,
+        is_rx=False,
+        active=True,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(product)
+    session.flush()
+    change = pricing.apply_price_change(
+        product_facts(product),
+        None,
+        PriceState(regular_cents=row.regular_cents),
+        [],
+        now,
+        PriceSource.IMPORT,
+    )
+    _store_change(session, product, None, change, actor=actor, now=now, import_run_id=run.id)
+    return list(change.events)
+
+
+def _import_changed(
+    session: Session,
+    entry: DiffEntry,
+    product: Product,
+    price: Price | None,
+    history: list[PricePoint],
+    run: ImportRun,
+    actor: str,
+    now: datetime,
+) -> list[PriceEvent]:
+    events: list[PriceEvent] = []
+    row = entry.row
+    if entry.field_changes:
+        old_facts = product_facts(product)
+        for field_change in entry.field_changes:
+            new = field_change.new
+            setattr(product, field_change.field, new.value if isinstance(new, PackUnit) else new)
+        product.updated_at = now
+        product_change = pricing.apply_product_change(
+            old_facts,
+            product_facts(product),
+            price_state(price) if price is not None else None,
+            history,
+            now,
+        )
+        if product_change is not None:
+            price, points = _store_change(
+                session, product, price, product_change, actor=actor, now=now,
+                import_run_id=run.id,
+            )  # fmt: skip
+            history = [*history, *points]
+            events += product_change.events
+    if price is None or price.regular_cents != row.regular_cents:
+        old = price_state(price) if price is not None else None
+        # Pass the stored promo through unchanged; leaving it out would end it.
+        requested = (
+            dataclasses.replace(old, regular_cents=row.regular_cents)
+            if old is not None
+            else PriceState(regular_cents=row.regular_cents)
+        )
+        change = pricing.apply_price_change(
+            product_facts(product), old, requested, history, now, PriceSource.IMPORT
+        )
+        _store_change(session, product, price, change, actor=actor, now=now, import_run_id=run.id)
+        events += change.events
+    return events
+
+
+# --- Manual edits ---------------------------------------------------------------------
+
+
+def edit_price(
+    session: Session,
+    product_id: int,
+    regular_cents: int,
+    *,
+    actor: str,
+    now: datetime | None = None,
+    store_id: int = DEFAULT_STORE_ID,
+) -> PriceChange | None:
+    """Change a product's regular price by hand (section 6, "Manual edit").
+
+    Goes through ``apply_price_change`` with source ``manual``, keeping the stored promo
+    unchanged, and marks the product as manually changed since the last import. Logs
+    ``price.manual`` with the old and new price. Returns ``None`` and writes nothing
+    when the price is already ``regular_cents``.
+    """
+    if isinstance(regular_cents, bool) or not isinstance(regular_cents, int):
+        raise TypeError("regular_cents must be an integer number of cents")
+    if regular_cents < 0:
+        raise ValueError("regular_cents must not be negative")
+    now = _check_now(now)
+    with session.begin_nested():
+        price = _lock_price(session, product_id)
+        product = _lock_product(session, product_id, store_id)
+        old = price_state(price) if price is not None else None
+        if old is not None and old.regular_cents == regular_cents:
+            return None
+        requested = (
+            dataclasses.replace(old, regular_cents=regular_cents)
+            if old is not None
+            else PriceState(regular_cents=regular_cents)
+        )
+        history = load_history(session, [product_id])[product_id]
+        change = pricing.apply_price_change(
+            product_facts(product), old, requested, history, now, PriceSource.MANUAL
+        )
+        _store_change(session, product, price, change, actor=actor, now=now)
+        product.manually_changed_at = now
+        _log(
+            session,
+            "price.manual",
+            {
+                "product_id": product.id,
+                "ean": product.ean,
+                "old_regular_cents": old.regular_cents if old is not None else None,
+                "new_regular_cents": regular_cents,
+            },
+            actor,
+            now,
+            store_id,
+        )
+        session.flush()
+    return change
+
+
+@dataclass(frozen=True, slots=True)
+class ProductFields:
+    """The editable fields of a product, as a whole. Build one from the current row
+    with ``ProductFields.of(product)`` and change fields with ``dataclasses.replace``."""
+
+    name: str
+    brand: str | None
+    pack_qty_milli: int | None
+    pack_unit: PackUnit | None
+    unit_price_required: bool
+    is_rx: bool
+    active: bool
+
+    @classmethod
+    def of(cls, product: Product) -> ProductFields:
+        return cls(
+            name=product.name,
+            brand=product.brand,
+            pack_qty_milli=product.pack_qty_milli,
+            pack_unit=PackUnit(product.pack_unit) if product.pack_unit else None,
+            unit_price_required=product.unit_price_required,
+            is_rx=product.is_rx,
+            active=product.active,
+        )
+
+    def check(self) -> None:
+        """Raise ``ValueError`` for values the database would refuse."""
+        if not self.name.strip():
+            raise ValueError("name is empty")
+        if self.pack_qty_milli is not None and self.pack_qty_milli <= 0:
+            raise ValueError("pack size must be positive")
+        if self.unit_price_required and (self.pack_qty_milli is None or self.pack_unit is None):
+            raise ValueError("a unit price needs a pack size and unit")
+
+
+def _changed_fields(old: ProductFields, new: ProductFields) -> dict[str, list[object]]:
+    return {
+        f.name: [getattr(old, f.name), getattr(new, f.name)]
+        for f in dataclasses.fields(ProductFields)
+        if getattr(old, f.name) != getattr(new, f.name)
+    }
+
+
+def edit_product(
+    session: Session,
+    product_id: int,
+    fields: ProductFields,
+    *,
+    actor: str,
+    now: datetime | None = None,
+    store_id: int = DEFAULT_STORE_ID,
+) -> PriceChange | None:
+    """Edit a product's fields through the shared write path (Tasos, decision 4).
+
+    Calls ``apply_product_change`` in the same transaction as the product update and
+    stores its result; setting ``is_rx`` thereby ends any active or scheduled promo
+    and writes a history row. Logs ``product.edited`` with each changed field's old and
+    new value. Returns the price change, or ``None`` if the price is unaffected; an
+    edit that changes nothing writes nothing.
+    """
+    fields.check()
+    now = _check_now(now)
+    with session.begin_nested():
+        price = _lock_price(session, product_id)
+        product = _lock_product(session, product_id, store_id)
+        old_fields = ProductFields.of(product)
+        changed = _changed_fields(old_fields, fields)
+        if not changed:
+            return None
+        old_facts = product_facts(product)
+        product.name = fields.name.strip()
+        product.brand = fields.brand
+        product.pack_qty_milli = fields.pack_qty_milli
+        product.pack_unit = fields.pack_unit.value if fields.pack_unit else None
+        product.unit_price_required = fields.unit_price_required
+        product.is_rx = fields.is_rx
+        product.active = fields.active
+        product.updated_at = now
+        history = load_history(session, [product_id])[product_id]
+        change = pricing.apply_product_change(
+            old_facts,
+            product_facts(product),
+            price_state(price) if price is not None else None,
+            history,
+            now,
+        )
+        if change is not None:
+            _store_change(session, product, price, change, actor=actor, now=now)
+        _log(
+            session,
+            "product.edited",
+            {"product_id": product.id, "ean": product.ean, "changes": changed},
+            actor,
+            now,
+            store_id,
+        )
+        session.flush()
+    return change
+
+
+def history_of(session: Session, product_id: int) -> Sequence[PricePoint]:
+    """A product's price history in id order (for the product page and tests)."""
+    return load_history(session, [product_id])[product_id]
