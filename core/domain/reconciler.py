@@ -52,7 +52,7 @@ from enum import StrEnum
 from shared.gateway_api import JobOutcome, PushErrorCode
 
 BACKOFF: tuple[timedelta, ...] = tuple(timedelta(minutes=m) for m in (1, 5, 15, 60, 240))
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS = 6  # 1 initial push + 5 retries, one per BACKOFF step
 CLAIM_TIMEOUT = timedelta(minutes=5)
 
 

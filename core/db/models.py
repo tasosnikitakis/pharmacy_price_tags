@@ -222,6 +222,7 @@ class Tag(Base):
     rssi: Mapped[int | None] = mapped_column(Integer)
     battery_mv: Mapped[int | None] = mapped_column(Integer)
     battery_pct: Mapped[int | None] = mapped_column(Integer)
+    firmware: Mapped[str | None] = mapped_column(String(64))  # as reported in discovery
     displayed_hash: Mapped[str | None] = mapped_column(String(64))
     desired_hash: Mapped[str | None] = mapped_column(String(64))
     # Set whenever desired_hash changes; lets the reconciler tell a stale dead job.

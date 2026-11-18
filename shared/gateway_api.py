@@ -127,7 +127,10 @@ class SeenTagReport(_Model):
     model: str | None = None
     rssi: int | None = Field(default=None, description="dBm")
     battery_mv: int | None = Field(default=None, ge=0)
-    battery_pct: int | None = Field(default=None, ge=0, le=100)
+    battery_pct: int | None = Field(
+        default=None, ge=0, le=100, description="Only if the tag reports a calibrated value"
+    )
+    firmware: str | None = Field(default=None, max_length=64)
     seen_at: AwareDatetime
 
 

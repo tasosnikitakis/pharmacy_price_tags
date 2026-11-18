@@ -1,6 +1,6 @@
 # ESL System: Build Plan for the Coding Agent
 
-Version of 18 November 2026. This file is the source of truth for the build.
+Version of 18 November 2026, updated the same day with Tasos's answers on job attempts and promo rules. This file is the source of truth for the build.
 
 ## Brief for the lead agent
 
@@ -219,7 +219,7 @@ Money is stored as integer cents, timestamps as UTC, and every table carries `st
 | --- | --- | --- |
 | `store` | id, name, timezone | One row in v1 (`Europe/Athens`) |
 | `user` | id, email, password_hash, role | Roles: `admin`, `staff` |
-| `product` | id, ean (unique per store), name, brand, pack_qty, pack_unit, unit_price_required, is_rx, active | `pack_unit` in g, ml or pieces |
+| `product` | id, ean (unique per store), name, brand, pack_qty_milli, pack_unit, unit_price_required, is_rx, active | `pack_unit` in g, ml or pieces; `pack_qty_milli` in thousandths of it (4.8 g = 4800) |
 | `price` | product_id, regular_cents, promo_cents, promo_from, promo_to, updated_at | Current state, one row per product |
 | `price_history` | id, product_id, effective_cents, kind, valid_from, source | Append-only; `source` is `import`, `manual` or `promo` |
 | `tag_type` | id, vendor, model, width, height, palette | Example: gicisky, 2.9", 296×128, `BWR` |
@@ -239,12 +239,16 @@ queued -> claimed -> acked
              |
              +-> failed -> queued   (retry with backoff: 1, 5, 15, 60, 240 min)
                       |
-                      +-> dead      (after 5 attempts; shown in monitoring)
+                      +-> dead      (after 6 attempts: 1 initial + 5 retries; shown in monitoring)
+queued | failed -> cancelled        (replaced by a newer desired_hash)
 ```
 
-- A job is `acked` only when the driver confirms the tag accepted the full image. The core then sets `tag.displayed_hash`.
-- A claimed job with no result after 5 minutes returns to `queued`.
-- If a newer `desired_hash` appears while a job is queued or failed, the old job is cancelled and replaced, so a tag never receives an outdated price.
+- A job is `acked` only when the driver confirms the tag accepted the full image. The core then sets `tag.displayed_hash` to that job's `render_hash` (not to the tag's current `desired_hash`), so a newer label is queued on the next pass.
+- A claimed job with no result after 5 minutes returns to `queued`; the lost push counts as an attempt. Each result carries the attempt it reports on, and a late result for an earlier claim is rejected.
+- If a newer `desired_hash` appears while a job is queued or failed, the old job is `cancelled` and replaced, so a tag never receives an outdated price. A `claimed` job is never cancelled, because the gateway may be pushing it; the newer label waits for its result.
+- When a push may have landed but was not confirmed (stale claim, timeout or protocol error), `tag.displayed_hash` becomes unknown and the current label is pushed again.
+- An admin can retry a `dead` job from the Tags page; this creates a fresh job.
+- Decisions 0007 and 0004 record the details.
 
 ## 6. Catalogue, import and price rules
 
@@ -272,13 +276,15 @@ The catalogue is the only thing tags render from. CSV import and manual edits ar
 | Rule | Behaviour in the system |
 | --- | --- |
 | Price shown with VAT, two decimals and the euro sign | Catalogue prices are VAT-inclusive; format as `12,90 €` |
-| Unit price where required | If `unit_price_required`, compute price per kg, litre or piece from `pack_qty` and `pack_unit` and use a unit-price template |
-| Unit price at least 70% of the selling price's character size, both bold | Enforced by the template; covered by a test that measures rendered glyph heights |
-| A discount must show the lowest price of the previous 30 days | Promo templates show a prior price computed as the minimum `effective_cents` in the 30 days before `promo_from` |
-| Less than 30 days of history | A promo cannot be activated until an admin enters the prior price by hand; the entry is logged |
-| Prescription medicines must not be promoted | Products with `is_rx` cannot be given a promo price or a promo template |
+| Unit price where required | If `unit_price_required`, compute price per kg, litre or piece from the pack size (`pack_qty_milli`, thousandths of `pack_unit`) and use a unit-price template. Promo labels for such products also show the unit price, computed from the promo price |
+| Unit price at least 70% of the selling price's character size, both bold | Enforced by the `unit_price` and `promo` templates; covered by a test that measures rendered glyph heights on both |
+| A discount must show the lowest price of the previous 30 days | Promo templates show a prior price: the lowest price in effect in the 30 days before the promo takes effect (`promo_from`), up to that moment, so a drop earlier the same day counts |
+| A promo must be a real reduction | The promo price must be strictly below both the prior price and the current regular price; otherwise the promo is refused (decision 0009) |
+| Promo start | `promo_from` is a timestamp, not a date. A promo "from today" starts when it is saved; a `promo_from` in the past is refused. A running promo may have its end or price edited without moving its start (decision 0009) |
+| Less than 30 days of history | A promo cannot be activated until an admin enters the prior price by hand. An entered prior price is always accepted and logged, even if unchanged. A stored one is cleared when the promo changes or ends, unless the admin enters one in the same edit |
+| Prescription medicines must not be promoted | Products with `is_rx` cannot be given a promo price or a promo template. Setting `is_rx` ends any active or scheduled promo and writes a history row for it |
 
-A promo label is never rendered without a prior price. That check lives in `core/domain/` and has unit tests.
+A promo label is never rendered without a valid prior price. Every write to a price, and every product edit that affects one, goes through `core.domain.pricing` (`apply_price_change`, `apply_product_change`), which applies these rules and writes the price history; decision 0008 describes how history is read. These checks live in `core/domain/` and have unit tests.
 
 ## 7. Rendering and label templates
 
@@ -305,7 +311,7 @@ Labels are drawn directly with Pillow at the tag's native resolution and palette
 | --- | --- |
 | `standard` | Name, brand, price |
 | `unit_price` | Name, brand, price, unit price at the required relative size |
-| `promo` | Name, promo price in red, prior price struck through, validity end date |
+| `promo` | Name, promo price in red, prior price struck through, validity end date; unit price (from the promo price, same size rule) when required |
 | `unassigned` | Short code and tag model |
 
 **Tests**
@@ -397,7 +403,7 @@ Milestones M0–M3 and M5 need no hardware and can start today; only M4 and M6 w
 | M0 | Skeleton | Repo layout, `pyproject.toml`, Docker Compose (core + Postgres), first migration, GitHub Actions CI with ruff, mypy and pytest, health endpoint | `docker compose up` serves `/health`; CI is green | No |
 | M1 | Catalogue and import | Product and price models, price history, CSV import with profiles and preview diff, manual price edit, event log | A Greek export (Windows-1253, decimal comma) imports correctly, first the synthetic fixture and then `tests/fixtures/erp_sample.csv`; re-import shows only real changes; all changes appear in history | No |
 | M2 | Renderer | Palette handling, bundled fonts, four templates, content hashing, render store, pricing rules in `core/domain/` | Golden-image tests pass; palette test passes; promo without prior price is refused | No |
-| M3 | Tags, bindings, queue | Tag and binding models, reconciler, update-job state machine, gateway API, gateway agent with fake driver | End to end with the fake driver: a price change produces a new PNG for exactly the bound tags; injected failures retry and end in `dead` after 5 attempts | No |
+| M3 | Tags, bindings, queue | Tag and binding models, reconciler, update-job state machine, gateway API, gateway agent with fake driver | End to end with the fake driver: a price change produces a new PNG for exactly the bound tags; injected failures retry and end in `dead` after 6 attempts | No |
 | M4 | Gicisky driver | `docs/gicisky-protocol.md`, BLE driver, `push_png.py` tool, discovery reporting | A price edit in the UI appears on a real tag within 2 minutes; 50 consecutive pushes succeed at 3 m | Yes |
 | M5 | Admin UI and binding | All pages in section 9, login and roles, phone binding and audit flows | A staff user can bind a product to a tag from a phone unaided; dashboard numbers match the database | No (fake driver) |
 | M6 | Store install | Runbook, systemd unit for the gateway, HTTPS on the private network, nightly Postgres dump to off-site storage, restore tested | A fresh box is installed from the runbook alone; a restore from backup is demonstrated; staleness and failed-job warnings show up | Yes |
@@ -428,5 +434,5 @@ Suggested order while waiting for hardware: M0, M1, M2, M3, M5, then M4 when the
 - [ ] Which box will run it in the shop (Raspberry Pi 5 or mini-PC), and where will it sit relative to the pilot shelf?
 - [ ] Where should nightly backups go (for example a Cloudflare R2 bucket)?
 - [ ] Who uses it besides you, and is `admin` plus `staff` enough?
-- [ ] Have the price-display rules in section 6 confirmed by your accountant, a lawyer or the Φαρμακευτικός Σύλλογος, including which product categories are exempt from unit pricing and how to treat non-prescription medicines.
+- [ ] Have the price-display rules in section 6 confirmed by your accountant, a lawyer or the Φαρμακευτικός Σύλλογος, including which product categories are exempt from unit pricing, how to treat non-prescription medicines, and whether promo labels must also show the unit price (v1 shows it, computed from the promo price, whenever `unit_price_required` is set).
 - [ ] Which licence for the public repository (for example MIT, Apache-2.0, or none yet)?

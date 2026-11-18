@@ -18,7 +18,10 @@ class GatewaySettings(BaseSettings):
     @field_validator("gateway_token")
     @classmethod
     def _long_enough(cls, value: SecretStr) -> SecretStr:
-        if len(value.get_secret_value()) < MIN_SECRET_LENGTH:
+        raw = value.get_secret_value()
+        if raw != raw.strip():
+            raise ValueError("has leading or trailing whitespace; remove it")
+        if len(raw) < MIN_SECRET_LENGTH:
             raise ValueError(f"must be at least {MIN_SECRET_LENGTH} characters; generate one")
         return value
 

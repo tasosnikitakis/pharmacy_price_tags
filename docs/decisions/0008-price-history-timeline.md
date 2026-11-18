@@ -5,9 +5,11 @@
 from its `valid_from` onward. Rows may be dated in the future.
 
 Every write to a `price` row, from an import, a manual edit or a promo edit, goes
-through `core.domain.pricing.apply_price_change`. It clears a manual prior price when
-the promo changes, re-validates a promo that has not started yet, and returns the new
-state, the events, and the history rows from `history_rows_for_change`:
+through `core.domain.pricing.apply_price_change` (product edits that affect a promo
+through `apply_product_change`). It clears a carried-over manual prior price when the
+promo changes unless the admin enters one in the same edit, re-validates every running
+or scheduled promo against the new state, and returns the new state, the events, and
+the history rows from `history_rows_for_change`:
 
 1. a row at *now* with the price in effect now (`promo` kind if a promo is active);
 2. if the promo starts later, a `promo` row at `promo_from`;
@@ -22,12 +24,14 @@ changed promo needs no deletion, which the append-only trigger forbids anyway.
 it, then update it and insert the history rows in the same transaction, so history id
 order always matches the order of writes.
 
-**A promo refused later.** A promo accepted when entered can become unlawful before it
-starts, for example when an import lowers the price inside its 30-day window below the
-promo price. `apply_price_change` then removes the promo and records `promo.refused`,
-so history never claims a promo price that was not on the shelf. As a safety net,
-`effective_template` renders the regular label with `regular_cents` if a refused promo
-is ever found at render time. A tag never shows a promo without a valid prior price.
+**A promo refused later.** A promo accepted when entered can become unlawful while it
+is scheduled or running: an import can lower the regular price below the promo price,
+or lower the 30-day low before a scheduled start. `apply_price_change` re-validates
+every remaining promo on every write, removes a refused one at that moment and records
+`promo.refused`, so history never claims a promo price that was not on the shelf. As a
+safety net, `effective_template` renders the regular label with `regular_cents` if a
+refused promo is ever found at render time; reaching it means a write bypassed
+`apply_price_change`. A tag never shows a promo without a valid prior price.
 
 **Scheduled changes.** `next_label_change` gives the next `promo_from` or `promo_to`;
 the reconciler re-computes the affected tags' labels at that moment.

@@ -88,6 +88,14 @@ def test_job_result_code_must_match_outcome() -> None:
         )
 
 
+def test_every_backoff_step_is_used() -> None:
+    """Dead after 6 attempts (1 initial + 5 retries): one retry per backoff step."""
+    from core.domain.reconciler import BACKOFF, MAX_ATTEMPTS
+
+    assert MAX_ATTEMPTS == 6
+    assert len(BACKOFF) == MAX_ATTEMPTS - 1
+
+
 def test_job_state_names_match_domain_and_db() -> None:
     from typing import get_args
 
