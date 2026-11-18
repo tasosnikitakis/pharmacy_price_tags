@@ -15,7 +15,8 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import Select, and_, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from core.db.models import (
@@ -39,7 +40,7 @@ from core.domain.types import (
     PriceState,
     ProductFacts,
 )
-from core.render.label import Render, TemplateKey
+from core.render.label import TEMPLATE_VERSIONS, Render, TemplateKey
 from core.services.queue import reconcile, tag_type_of
 from core.services.render_store import save_render
 from shared.gateway_api import SeenTagReport, TagsSeenResponse
@@ -156,9 +157,10 @@ def refresh_desired_hashes(
         try:
             outcome = pipeline(request, now)
         except (ValueError, PromoRefused) as exc:
-            log.warning("label for tag %s cannot be built: %s", tag.id, exc)
+            _log_label_failure(tag.id, exc)
             result.failed.append(tag.id)
             continue
+        _failing_tags.discard(tag.id)
         rendered = outcome.render
         if rendered.tag_type_key != request.tag_type.key:
             raise ValueError(f"render for tag {tag.id} is for another tag type")
@@ -176,6 +178,225 @@ def refresh_desired_hashes(
     session.flush()
     reconcile(session, now, [t.id for t in tags])
     return result
+
+
+#: Tags whose last label build failed, in this process. A failing tag is retried on
+#: every refresh (a promo boundary keeps matching until its label can be built), so
+#: only its first failure is logged as a warning; repeats go to debug until a success.
+_failing_tags: set[int] = set()
+
+
+def _log_label_failure(tag_id: int, exc: BaseException) -> None:
+    if tag_id in _failing_tags:
+        log.debug("label for tag %s still cannot be built (%s)", tag_id, type(exc).__name__)
+        return
+    _failing_tags.add(tag_id)
+    # The message only for the expected errors; an unexpected one may carry SQL.
+    detail = f": {exc}" if isinstance(exc, ValueError | PromoRefused) else ""
+    log.warning("label for tag %s cannot be built (%s)%s", tag_id, type(exc).__name__, detail)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled promo starts and ends (docs/decisions/0014)
+
+
+def promo_boundary_tags(
+    session: Session, now: datetime, store_id: int = DEFAULT_STORE_ID
+) -> list[int]:
+    """Bound tags whose label has changed by itself since it was last computed: their
+    product's promo started or ended in ``(tag.desired_hash_changed_at, now]``.
+
+    Only a *flip* of the promo's activity counts: started and not yet ended, or ended
+    when it had already started at ``desired_hash_changed_at``. A promo that both
+    started and ended in the window (the gateway was offline for all of it) leaves the
+    label as it was, so it is not returned; otherwise its tags would be rendered on
+    every claim, because an unchanged hash does not move ``desired_hash_changed_at``.
+
+    Tags without ``desired_hash_changed_at`` (no label was ever built) are left out.
+    Read without locks; the caller locks what it refreshes. Cost: one pass over the
+    ``price`` rows that carry a promo that has started (a few thousand rows at most),
+    joined to ``binding`` by its ``product_id`` index and to ``tag`` by primary key.
+    """
+    return list(session.scalars(_promo_boundary_query(now, store_id)))
+
+
+def _promo_boundary_query(now: datetime, store_id: int) -> Select[tuple[int]]:
+    seen = Tag.desired_hash_changed_at
+    start, end = Price.promo_from, Price.promo_to
+    started = and_(start > seen, start <= now, end > now)
+    ended = and_(start <= seen, end > seen, end <= now)
+    return (
+        select(Tag.id)
+        .join(Binding, Binding.tag_id == Tag.id)
+        .join(Price, Price.product_id == Binding.product_id)
+        .where(
+            Tag.store_id == store_id,
+            seen.is_not(None),
+            Price.promo_from.is_not(None),
+            Price.promo_from <= now,
+            or_(started, ended),
+        )
+        .order_by(Tag.id)
+    )
+
+
+def refresh_promo_boundaries(
+    session: Session,
+    pipeline: LabelPipeline,
+    now: datetime,
+    store_id: int = DEFAULT_STORE_ID,
+) -> RefreshResult:
+    """Refresh the tags of ``promo_boundary_tags``; called on every gateway claim,
+    before jobs are handed out, so a scheduled promo appears or ends within one claim
+    interval of its time (decision 0014).
+
+    Tags another transaction holds are skipped (``SKIP LOCKED``), so a claim never
+    waits behind a long import; they still match next time, because only a changed
+    ``desired_hash`` moves ``desired_hash_changed_at``. After that the locks follow
+    ``refresh_desired_hashes``: the tags (already held), then their jobs.
+    """
+    candidates = _promo_boundary_query(now, store_id).subquery()
+    locked = list(
+        session.scalars(
+            select(Tag.id)
+            .where(Tag.id.in_(select(candidates.c.id)))
+            .order_by(Tag.id)
+            .with_for_update(key_share=True, skip_locked=True)
+        )
+    )
+    if not locked:
+        return RefreshResult()
+    try:
+        with session.begin_nested():
+            return refresh_desired_hashes(session, pipeline, now, tag_ids=locked)
+    except Exception as exc:
+        # Rolled back to the savepoint. One bad tag must not hold the others back,
+        # so refresh them one by one; the failing ones are retried on the next claim.
+        log.debug("promo boundary refresh of tags %s failed (%s)", locked, type(exc).__name__)
+    result = RefreshResult()
+    for tag_id in locked:
+        try:
+            with session.begin_nested():
+                one = refresh_desired_hashes(session, pipeline, now, tag_ids=[tag_id])
+        except Exception as exc:
+            _log_label_failure(tag_id, exc)
+            result.failed.append(tag_id)
+            continue
+        result.changed += one.changed
+        result.failed += one.failed
+        if one.next_change is not None and (
+            result.next_change is None or one.next_change < result.next_change
+        ):
+            result.next_change = one.next_change
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Bindings (minimal; workstream E adds the binding pages on top of this)
+
+
+class BindingError(ValueError):
+    """The tag, product or template cannot be bound as asked."""
+
+
+def template_row(session: Session, tag_type_row_id: int, key: TemplateKey) -> Template:
+    """The ``template`` row for ``key`` at its current code version on a tag type,
+    created if missing. Safe against a concurrent insert of the same row."""
+    version = TEMPLATE_VERSIONS[key]
+    session.execute(
+        insert(Template)
+        .values(
+            store_id=DEFAULT_STORE_ID, key=key.value, version=version, tag_type_id=tag_type_row_id
+        )
+        .on_conflict_do_nothing(index_elements=["store_id", "key", "version", "tag_type_id"])
+    )
+    return session.scalars(
+        select(Template).where(
+            Template.store_id == DEFAULT_STORE_ID,
+            Template.key == key.value,
+            Template.version == version,
+            Template.tag_type_id == tag_type_row_id,
+        )
+    ).one()
+
+
+def bind_tag(
+    session: Session,
+    tag_id: int,
+    product_id: int,
+    *,
+    actor: str,
+    now: datetime,
+    template: TemplateKey = TemplateKey.STANDARD,
+    bound_by: int | None = None,
+    pipeline: LabelPipeline = real_label_pipeline,
+) -> RefreshResult:
+    """Bind a tag to a product (or rebind it), log ``tag.bound`` and refresh its label.
+
+    The template is the bound *key*; ``effective_template`` still picks ``promo`` or
+    ``unit_price`` when the product needs it.
+
+    Locks, in the catalogue's order (decision 0014): the product, and on a rebind the
+    product the tag leaves, ``FOR SHARE`` in id order; then the tag ``FOR NO KEY
+    UPDATE``; then its jobs through ``refresh_desired_hashes``. ``FOR SHARE`` conflicts
+    with the ``FOR NO KEY UPDATE`` every catalogue writer takes on a product, so a bind
+    waits for an open price or product write on that product to commit and then renders
+    the new price; and a writer that starts after the bind waits for it, then sees the
+    committed binding and refreshes the tag itself. Either way the tag never keeps a
+    price older than the last committed write.
+    """
+    if template is TemplateKey.UNASSIGNED:
+        raise BindingError("the unassigned template is for unbound tags only")
+    leaving = session.scalar(select(Binding.product_id).where(Binding.tag_id == tag_id))
+    product_ids = sorted({product_id} | ({leaving} if leaving is not None else set()))
+    locked = set(
+        session.scalars(
+            select(Product.id)
+            .where(Product.id.in_(product_ids), Product.store_id == DEFAULT_STORE_ID)
+            .order_by(Product.id)
+            .with_for_update(read=True)
+        )
+    )
+    if product_id not in locked:
+        raise BindingError(f"product {product_id} not found")
+    tag = session.scalars(
+        select(Tag)
+        .where(Tag.id == tag_id, Tag.store_id == DEFAULT_STORE_ID)
+        .with_for_update(key_share=True)
+    ).one_or_none()
+    if tag is None:
+        raise BindingError(f"tag {tag_id} not found")
+    # Re-read under the tag lock: a concurrent rebind may have committed meanwhile. Its
+    # product is not locked here (that would take a product lock after a tag lock); it
+    # needs none, because a writer on it locks this tag and waits for this bind.
+    template_id = template_row(session, tag.tag_type_id, template).id
+    binding = session.scalars(
+        select(Binding).where(Binding.tag_id == tag_id).execution_options(populate_existing=True)
+    ).one_or_none()
+    previous = binding.product_id if binding is not None else None
+    if binding is None:
+        binding = Binding(store_id=DEFAULT_STORE_ID, tag_id=tag_id)
+        session.add(binding)
+    binding.product_id = product_id
+    binding.template_id = template_id
+    binding.bound_at = now
+    binding.bound_by = bound_by
+    session.add(
+        EventLog(
+            store_id=DEFAULT_STORE_ID,
+            at=now,
+            actor=actor,
+            kind="tag.bound",
+            payload={
+                "tag_id": tag_id,
+                "product_id": product_id,
+                "previous_product_id": previous,
+                "template": template.value,
+            },
+        )
+    )
+    session.flush()
+    return refresh_desired_hashes(session, pipeline, now, tag_ids=[tag_id])
 
 
 def _log_promo_refused(

@@ -24,16 +24,17 @@ reason rather than guessed.
   files this usually means unquoted decimal commas"). Real exports have consistent
   widths, and a split decimal adds a cell, so it can only hide in a row that also lost
   one. In `;` and tab files a too-long row is rejected on its own and a short row is
-  padded with empty cells. A row is also rejected as a split decimal (`12,90` read as `12` and `90`)
-  when the price cell and the next cell were both unquoted, the price is a bare integer,
-  the next cell has 1–2 digits, and the next column is empty in the header or mapped to
-  the name or brand. A quoted price, or a VAT or pack column after the price, is fine.
-  `;` and tab files are unaffected. An unclosed quote rejects the file with its line.
-  A grouped integer (`1.290` before `50`) counts as the integer part too. Any such row
-  rejects the whole file ("prices look like unquoted decimal commas; re-export with
-  quoted prices or a `;` delimiter"), because the same file may contain rows that lost a
-  trailing cell and so still match the header width. A `,` file in which every row lost
-  its trailing cell cannot be detected; prices in comma files must be quoted.
+  padded with empty cells. A row that looks like a split decimal (`12,90` read as `12`
+  and `90`) refuses the whole file: the price cell and the next cell were both unquoted,
+  the price is a bare integer or a grouped one (`1.290` before `50`), the next cell has
+  1–2 digits, and the next column is empty in the header or mapped to the name or brand.
+  The message is "prices look like unquoted decimal commas; re-export with quoted prices
+  or a `;` delimiter". The whole file goes, not just the row, because the same file may
+  contain rows that lost a trailing cell and so still match the header width. A quoted
+  price, or a VAT or pack column after the price, is fine. `;` and tab files are
+  unaffected. An unclosed quote rejects the file with its line. A `,` file in which
+  every row lost its trailing cell cannot be detected; prices in comma files must be
+  quoted.
 - Only ASCII digits are accepted in prices, pack sizes and EANs.
 - Pack sizes go to `pack_qty_milli`; kg and l convert exactly to g and ml. Greek and
   English unit spellings are accepted, ignoring case, accents and a trailing dot.

@@ -33,6 +33,6 @@ so a failing step never stops the others.
 `[A-Za-z0-9._-]` with `_`, because a BLE address with colons is not a valid Windows file
 name. It validates PNGs with the standard library, so the gateway still needs no Pillow.
 
-**Not yet wired (integration).** `core.services.tags.refresh_desired_hashes` must be
-called after imports, price edits and binding changes, and re-run at the next scheduled
-promo start or end (`next_label_change`). The lead wires these when A and C are merged.
+**Wiring.** Imports, price edits, product edits and bindings call
+`refresh_desired_hashes`, and each gateway claim re-checks promo starts and ends; see
+decision 0014.
