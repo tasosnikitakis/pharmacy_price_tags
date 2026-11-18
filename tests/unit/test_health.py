@@ -53,8 +53,11 @@ class _BrokenSession:
         raise OperationalError("SELECT 1", {}, Exception("down"))
 
 
-def test_health_reports_unavailable_database() -> None:
+def test_health_reports_unavailable_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", _fake_url(_fake_password()))  # never connected
+    get_settings.cache_clear()
     app = create_app()
+    get_settings.cache_clear()
 
     def _session() -> Iterator[_BrokenSession]:
         yield _BrokenSession()
@@ -279,6 +282,7 @@ def test_app_secrets_read_from_files(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     session, token = secrets.token_hex(32), secrets.token_hex(32)
     (tmp_path / "session_secret").write_bytes((session + "\n").encode())
     (tmp_path / "gateway_token").write_bytes((token + "\n").encode())
+    monkeypatch.setenv("DATABASE_URL", _fake_url(_fake_password()))
     monkeypatch.delenv("SESSION_SECRET")
     monkeypatch.delenv("GATEWAY_TOKEN")
     settings = Settings(_secrets_dir=tmp_path)
