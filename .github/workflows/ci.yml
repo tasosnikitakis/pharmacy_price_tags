@@ -44,6 +44,25 @@ jobs:
       - run: uv run alembic check
       - run: uv run pytest
 
+  windows:
+    name: pytest on Windows (no database)
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "0"  # behave like a default Windows install, not UTF-8 mode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.x"
+      - run: uv python install 3.12
+      - run: uv sync --all-extras --frozen
+      - name: Domain, renderer, config and secrets tests
+        shell: pwsh
+        run: |
+          $env:SESSION_SECRET = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+          $env:GATEWAY_TOKEN = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+          uv run pytest -m "not db and not hardware"
+
   compose:
     name: docker compose serves /health
     runs-on: ubuntu-latest
