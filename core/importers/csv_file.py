@@ -8,8 +8,6 @@ Interpreting the cells is ``core.domain.catalogue``'s job.
 from __future__ import annotations
 
 import codecs
-import csv
-import io
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -27,7 +25,7 @@ _ENCODING_ALIASES = {
     "win1253": "cp1253",
 }
 
-#: Lines looked at when guessing the delimiter.
+#: Records looked at when guessing the delimiter.
 _SNIFF_LINES = 20
 
 
@@ -73,25 +71,40 @@ def decode(data: bytes, encoding: str | None = None) -> tuple[str, str]:
     )
 
 
-def detect_delimiter(text: str) -> str:
-    """Guess the delimiter from the first lines of the file.
+def _sample(text: str, delimiter: str) -> list[list[str]]:
+    """The first non-blank records of ``text`` split with ``delimiter``; a quoted
+    cell left open (by the wrong delimiter guess or a cut-off sample) ends the sample."""
+    records: list[list[str]] = []
+    try:
+        for _, cells, _ in split_records(text, delimiter):
+            if any(cell.strip() for cell in cells):
+                records.append(cells)
+                if len(records) == _SNIFF_LINES:
+                    break
+    except ImportFormatError:
+        pass
+    return records
 
-    The first of ``;``, tab and ``,`` that splits every sampled line into the same
+
+def detect_delimiter(text: str) -> str:
+    """Guess the delimiter from the first records of the file.
+
+    The first of ``;``, tab and ``,`` that splits every sampled record into the same
     number of fields (more than one) wins; ``;`` comes first because a decimal comma
     makes ``,`` look plausible. Failing that, the candidate with the most fields in the
-    header line wins. Raises ``ImportFormatError`` if no candidate splits the header.
+    header wins. Records are split with ``split_records``, so a quoted cell holding a
+    line break, or a Unicode line separator inside a cell, never breaks a record.
+    Raises ``ImportFormatError`` if the file is empty or no candidate splits the header.
     """
-    lines = [line for line in text.splitlines() if line.strip()][:_SNIFF_LINES]
-    if not lines:
+    if not text.strip():
         raise ImportFormatError("the file is empty")
-    sample = "\n".join(lines)
     widths: dict[str, int] = {}
     for delimiter in DELIMITERS:
-        counts = {len(r) for r in csv.reader(io.StringIO(sample), delimiter=delimiter) if r}
+        records = _sample(text, delimiter)
+        counts = {len(r) for r in records}
         if len(counts) == 1 and counts.pop() > 1:
             return delimiter
-        header = next(csv.reader(io.StringIO(lines[0]), delimiter=delimiter))
-        widths[delimiter] = len(header)
+        widths[delimiter] = len(records[0]) if records else 0
     best = max(DELIMITERS, key=lambda d: widths[d])  # ties keep DELIMITERS order
     if widths[best] <= 1:
         raise ImportFormatError("cannot tell the delimiter: the header has a single column")

@@ -52,7 +52,6 @@ def test_erp_sample_parses() -> None:
 
 @needs_sample
 @pytest.mark.db
-@pytest.mark.xfail(raises=NotImplementedError, strict=True, reason="needs workstream B")
 def test_erp_sample_imports_and_reimports_unchanged(db: Session) -> None:
     profile = svc.save_profile(db, "erp-sample", _settings())
     data = SAMPLE.read_bytes()

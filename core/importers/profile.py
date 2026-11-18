@@ -95,13 +95,15 @@ class ParsedImport:
 
 
 def column_positions(table: Table, settings: ImportSettings) -> dict[Column, int]:
-    """Find each mapped column in the header (trimmed, case-insensitive).
+    """Find each mapped column in the header (ignoring case, whitespace and accents).
 
-    Raises ``ImportFormatError`` naming every mapped header the file lacks.
+    Raises ``ImportFormatError`` naming every mapped header the file lacks, and for a
+    mapped header that occurs more than once (twice as written, or with and without accents), since
+    the file does not say which column is meant. Repeated unmapped headers are fine.
     """
-    positions: dict[str, int] = {}
+    positions: dict[str, list[int]] = {}
     for index, header in enumerate(table.header):
-        positions.setdefault(_key(header), index)
+        positions.setdefault(_key(header), []).append(index)
     absent = [h for h in settings.mapping.values() if _key(h) not in positions]
     if absent:
         found = ", ".join(repr(h) for h in table.header)
@@ -109,11 +111,19 @@ def column_positions(table: Table, settings: ImportSettings) -> dict[Column, int
             f"the file lacks the column(s) {', '.join(repr(h) for h in absent)}; "
             f"its header is {found}"
         )
-    return {column: positions[_key(h)] for column, h in settings.mapping.items()}
+    for mapped in settings.mapping.values():
+        found_at = positions[_key(mapped)]
+        if len(found_at) > 1:
+            columns = " and ".join(f"{i + 1} ({table.header[i]!r})" for i in found_at)
+            raise ImportFormatError(
+                f"the header {mapped!r} appears more than once, in columns {columns}; "
+                "rename or remove the extra column"
+            )
+    return {column: positions[_key(h)][0] for column, h in settings.mapping.items()}
 
 
-_BARE_INTEGER = re.compile(r"^\d+$")
-_ONE_OR_TWO_DIGITS = re.compile(r"^\d{1,2}$")
+_BARE_INTEGER = re.compile(r"^[0-9]+$")
+_ONE_OR_TWO_DIGITS = re.compile(r"^[0-9]{1,2}$")
 
 
 #: Columns a stray price fragment can land in unnoticed: text fields, which accept a
@@ -125,16 +135,18 @@ def _split_decimal_comma(
     cells: list[str],
     quoted: list[bool],
     price_index: int,
+    width: int,
     next_column: Column | None,
     next_header: str,
 ) -> bool:
     """True when a ``,``-delimited row shows the trace of an unquoted ``12,90``.
 
     All must hold: the price cell and the next cell were both unquoted in the file;
-    the price is a bare integer and the next cell has 1 or 2 digits; and the next
+    the price is a bare integer and the next cell has 1 or 2 digits; and either the
+    row has exactly one cell more than the header (the split added it), or the next
     column is unnamed in the header (a trailing delimiter) or mapped to a text field
     (``name`` or ``brand``). A quoted ``"15","30"``, or a VAT or pack column holding
-    ``24`` after the price, is a valid row and is accepted.
+    ``24`` after the price in a row of the header's width, is a valid row.
     """
     after = price_index + 1
     if after >= len(cells) or quoted[price_index] or quoted[after]:
@@ -142,19 +154,22 @@ def _split_decimal_comma(
     if not (_BARE_INTEGER.match(cells[price_index].strip()) and
             _ONE_OR_TWO_DIGITS.match(cells[after].strip())):  # fmt: skip
         return False
-    return next_header == "" or next_column in _TEXT_COLUMNS
+    return len(cells) == width + 1 or next_header == "" or next_column in _TEXT_COLUMNS
 
 
 def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
     """Read file bytes with a profile into accepted and rejected rows.
 
     Raises ``ImportFormatError`` when the file as a whole cannot be read (encoding,
-    no header, mapped columns absent). Problems with single rows never raise: those
-    rows are rejected with a reason, including every row of a duplicate EAN.
+    no header, mapped or repeated mapped columns, split prices). Problems with single
+    rows never raise: those rows are rejected with a reason, including every row of a
+    duplicate EAN.
 
-    In a ``,``-delimited file an unquoted decimal comma silently shifts columns, so
-    there a row is also rejected when its cell count differs from the header's, or
-    when it looks like a split price (see ``_split_decimal_comma``).
+    In a ``,``-delimited file an unquoted decimal comma silently shifts columns. There
+    a row is rejected when its cell count differs from the header's, and the whole
+    file is refused when any row looks like a split price (``_split_decimal_comma``):
+    another row of the same export may have lost a trailing cell, kept the header's
+    width and so look valid, so no row of that file can be trusted.
     """
     table = read_table(data, settings.encoding, settings.delimiter)
     positions = column_positions(table, settings)
@@ -166,22 +181,20 @@ def parse_import(data: bytes, settings: ImportSettings) -> ParsedImport:
     next_header = table.header[price_index + 1] if price_index + 1 < width else ""
     parsed: list[ImportRow | RejectedRow] = []
     for (line, cells), quoted in zip(table.rows, table.quoted, strict=True):
+        if comma and _split_decimal_comma(
+            cells, quoted, price_index, width, next_column, next_header
+        ):
+            fragment = f"{cells[price_index].strip()},{cells[price_index + 1].strip()}"
+            raise ImportFormatError(
+                f"line {line}: prices look like unquoted decimal commas ({fragment}); "
+                "re-export with quoted prices or a ';' delimiter"
+            )
         # With ',' an unquoted decimal comma ("12,90") splits the price into two cells
         # and shifts every column after it, so any width mismatch is suspect.
         too_long = len(cells) > width and any(c.strip() for c in cells[width:])
         if too_long or (comma and len(cells) != width):
             parsed.append(
                 RejectedRow(line, f"row has {len(cells)} cells but the header has {width}")
-            )
-            continue
-        if comma and _split_decimal_comma(cells, quoted, price_index, next_column, next_header):
-            parsed.append(
-                RejectedRow(
-                    line,
-                    "price looks like an unquoted decimal comma "
-                    f"({cells[price_index].strip()},{cells[price_index + 1].strip()}); "
-                    'quote prices in comma-delimited files ("12,90")',
-                )
             )
             continue
         values = {

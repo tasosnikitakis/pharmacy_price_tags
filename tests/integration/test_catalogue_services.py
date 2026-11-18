@@ -5,10 +5,8 @@ Two kinds of test:
 - Storage tests replace ``core.domain.pricing.apply_price_change`` and
   ``apply_product_change`` with a recording stand-in. They check that the services
   call the shared write path with the right intent and store exactly what it returns,
-  in one transaction. They do not depend on workstream B and keep their value after
-  B lands.
-- End-to-end tests use the real pricing functions and are strict ``xfail`` until
-  workstream B implements them.
+  in one transaction, independently of the pricing rules themselves.
+- End-to-end tests use the real pricing functions.
 """
 
 # ruff: noqa: RUF001  (Greek test data is meant to look like Latin letters)
@@ -53,7 +51,6 @@ MAPPING = {
 }
 NOW = datetime(2026, 11, 18, 10, 0, tzinfo=UTC)
 ACTOR = "admin@example.test"
-NEEDS_B = pytest.mark.xfail(raises=NotImplementedError, strict=True, reason="needs workstream B")
 
 
 # --- Helpers --------------------------------------------------------------------------
@@ -525,6 +522,26 @@ def test_edit_price_validates_input(db: Session) -> None:
         svc.edit_price(db, 999_999, 100, actor=ACTOR, now=NOW)
     with pytest.raises(ValueError, match="at most"):
         svc.edit_price(db, 1, PRICE_CENTS_MAX + 1, actor=ACTOR, now=NOW)
+    with pytest.raises(ValueError, match="zero price"):
+        svc.edit_price(db, 1, 0, actor=ACTOR, now=NOW)
+
+
+def test_import_gives_a_price_to_a_product_without_one(
+    db: Session, profile: ImportProfile, fake: FakePricing
+) -> None:
+    # Such a product is locked (with all the store's products) before the diff is
+    # built, and every writer locks a product before its price, so no other
+    # transaction can add its price row in between and make this insert collide.
+    bare = Product(ean="2000000000022", name="ΈΛΑΙΟ ΣΩΜΑΤΟΣ ΉΠΙΟ")
+    db.add(bare)
+    db.flush()
+    result = svc.apply_import(db, _synthetic(), "export.csv", profile, actor=ACTOR, now=NOW)
+    entry = next(e for e in result.diff.changed if e.product_id == bare.id)
+    assert entry.old_regular_cents is None and entry.price_changed
+    call = next(c for c in fake.price_calls if c["product"].product_id == bare.id)
+    assert call["old"] is None and call["requested"] == PriceState(850)
+    price = db.get(Price, bare.id)
+    assert price is not None and price.regular_cents == 850
 
 
 def test_edit_price_other_store_is_not_found(db: Session, fake: FakePricing) -> None:
@@ -609,10 +626,9 @@ def test_edit_product_normalises_like_import(db: Session, fake: FakePricing) -> 
     assert product.brand is None
 
 
-# --- End to end with the real pricing rules (waiting on workstream B) ----------------
+# --- End to end with the real pricing rules -----------------------------------------
 
 
-@NEEDS_B
 def test_greek_import_end_to_end(db: Session, profile: ImportProfile) -> None:
     """M1: the synthetic Greek export imports, re-import shows only real changes,
     and every change appears in history."""
@@ -639,7 +655,6 @@ def test_greek_import_end_to_end(db: Session, profile: ImportProfile) -> None:
     assert _count(db, PriceHistory) == 11
 
 
-@NEEDS_B
 def test_manual_edit_then_import_end_to_end(db: Session, profile: ImportProfile) -> None:
     svc.apply_import(db, _synthetic(), "v1.csv", profile, actor=ACTOR, now=NOW)
     paste = _product(db, "2000000000121")
@@ -656,7 +671,6 @@ def test_manual_edit_then_import_end_to_end(db: Session, profile: ImportProfile)
     ]  # fmt: skip
 
 
-@NEEDS_B
 def test_setting_is_rx_ends_promo_end_to_end(db: Session) -> None:
     product = _seed(
         db, "2000000000015", "ΆΛΟΗ", 1290,

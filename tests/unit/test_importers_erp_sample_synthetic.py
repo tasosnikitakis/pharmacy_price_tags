@@ -48,6 +48,49 @@ def test_erp_sample_synthetic_file_format() -> None:
     assert len(table.rows) == 37
 
 
+_ML, _PCS, _G = PackUnit.MILLILITRE, PackUnit.PIECE, PackUnit.GRAM
+
+#: Every accepted row of the fixture, read off the file by hand, in file order:
+#: (EAN, price in cents, pack size in thousandths of the unit, unit).
+EXPECTED_ACCEPTED = [
+    ("3337104332186", 2190, 50_000, _ML),
+    ("3337196001335", 2450, 50_000, _ML),
+    ("5208908386379", 1580, 200_000, _ML),
+    ("5209402654230", 940, 250_000, _ML),
+    ("5205116155940", 690, 50_000, _ML),
+    ("3577078161843", 560, 75_000, _ML),
+    ("5209593103418", 720, 250_000, _ML),
+    ("8006316475251", 1699, 46_000, _PCS),
+    ("3574534192830", 395, 64_000, _PCS),
+    ("4015276483507", 420, 16_000, _PCS),
+    ("5016305641393", 890, 20_000, _PCS),
+    ("0033537672426", 1850, 60_000, _PCS),
+    ("0033388496967", 2740, 50_000, _PCS),
+    ("5205328710128", 1430, 8_000, _ML),
+    ("4719269166971", 990, 1_000, _PCS),
+    ("4015848018458", 7900, 1_000, _PCS),
+    ("5201462704825", 280, 12_000, _PCS),
+    ("4005814893257", 340, 1_000, _PCS),
+    ("5202880957015", 450, 500_000, _ML),
+    ("3282543039113", 2990, 15_000, _ML),
+    ("3504718227829", 3160, 105_000, _ML),
+    ("5204896383468", 1175, 200_000, _ML),
+    ("3401578713311", 630, 20_000, _PCS),
+    ("3401509839301", 810, 100_000, _ML),
+    ("5201031051831", 320, 20_000, _PCS),
+    ("0083473829972", 399, 10_000, _G),
+    ("8718376311652", 1840, 800_000, _G),
+    ("5206670106515", 129_000, 1_000, _PCS),
+    ("2000000123455", 450, 1_000, _PCS),
+]
+
+
+def test_erp_sample_synthetic_accepted_rows_exactly() -> None:
+    parsed = parse_import(SAMPLE.read_bytes(), sample_settings())
+    got = [(r.ean, r.regular_cents, r.pack_qty_milli, r.pack_unit) for r in parsed.rows]
+    assert got == EXPECTED_ACCEPTED
+
+
 def test_erp_sample_synthetic_matches_expected_result() -> None:
     parsed = parse_import(SAMPLE.read_bytes(), sample_settings())
 

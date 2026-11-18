@@ -79,6 +79,9 @@ def test_parse_price_cents(text: str, cents: int) -> None:
         ("1.2.3,00", "thousands"),
         ("12.34,5,6", "not a number"),
         ("1e3", "not a number"),
+        ("１２,90", "not a number"),  # fullwidth digits
+        ("12,９０", "not a number"),
+        ("١٢,٩٠", "not a number"),  # Arabic-Indic digits
         ("99999999999", "too large"),
     ],
 )
@@ -138,6 +141,8 @@ def test_parse_pack_empty_quantity_is_no_pack() -> None:
         ("1.000", "ml", "ambiguous"),
         ("200 ml", "g", "disagrees"),
         ("3000000", "kg", "too large"),
+        ("２００", "ml", "not a number"),  # fullwidth digits
+        ("4,８", "g", "not a number"),
     ],
 )
 def test_parse_pack_rejects(qty: str, unit: str, reason: str) -> None:

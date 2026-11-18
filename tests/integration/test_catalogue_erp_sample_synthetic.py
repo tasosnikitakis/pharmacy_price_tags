@@ -22,7 +22,6 @@ def _count(db: Session, model: type[Product] | type[PriceHistory]) -> int:
     return db.scalar(select(func.count()).select_from(model)) or 0
 
 
-@pytest.mark.xfail(raises=NotImplementedError, strict=True, reason="needs workstream B")
 def test_erp_sample_synthetic_imports_then_reimports_unchanged(db: Session) -> None:
     profile = svc.save_profile(db, "erp-sample-synthetic", sample_settings())
     data = SAMPLE.read_bytes()

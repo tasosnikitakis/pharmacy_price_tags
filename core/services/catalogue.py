@@ -30,6 +30,7 @@ from core.db.models import (
     Price,
     PriceHistory,
     Product,
+    Store,
 )
 from core.domain import pricing
 from core.domain.catalogue import (
@@ -317,6 +318,20 @@ def _lock_product(session: Session, product_id: int, store_id: int) -> Product:
     return product
 
 
+def _lock_products(
+    session: Session, store_id: int, product_ids: Sequence[int] | None = None
+) -> list[Product]:
+    """Lock the store's products (or the given ones) in id order."""
+    query = select(Product).where(Product.store_id == store_id)
+    if product_ids is not None:
+        query = query.where(Product.id.in_(product_ids))
+    return list(
+        session.scalars(
+            query.order_by(Product.id).with_for_update().execution_options(populate_existing=True)
+        )
+    )
+
+
 # --- Import ---------------------------------------------------------------------------
 
 
@@ -375,7 +390,8 @@ def apply_import(
 ) -> ImportResult:
     """Apply a file in one transaction (section 6, step 4).
 
-    The diff is rebuilt here after locking every ``price`` row of the store, so it
+    The diff is rebuilt here after locking the store, its products and its ``price``
+    rows, so it
     reflects the catalogue at the moment of writing. New products are created; changed
     prices go through ``apply_price_change`` with source ``import`` and the stored
     promo passed through unchanged; changed product fields go through
@@ -389,6 +405,13 @@ def apply_import(
     store_id = profile.store_id
     parsed = _parse(data, profile)
     with session.begin_nested():
+        # Lock order, the same in every writer: store (imports only), then products,
+        # then prices. The store row serialises imports, so two imports cannot both
+        # create the same new EAN. Edits lock their product before its price, so a
+        # product without a price row cannot get one behind the import's back (and
+        # vice versa): whoever comes second waits, then reads the committed row.
+        session.execute(select(Store.id).where(Store.id == store_id).with_for_update())
+        products = {p.id: p for p in _lock_products(session, store_id)}
         locked = session.scalars(
             select(Price)
             .where(Price.store_id == store_id)
@@ -399,16 +422,11 @@ def apply_import(
         prices = {price.product_id: price for price in locked}
         diff = build_diff(parsed.rows, parsed.rejected, catalogue_entries(session, store_id))
         matched = [*diff.changed, *diff.unchanged]
-        products = {
-            p.id: p
-            for p in session.scalars(
-                select(Product)
-                .where(Product.id.in_([e.product_id for e in matched]))
-                .order_by(Product.id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        }
+        # Under READ COMMITTED a product committed while this import waited for a lock
+        # is visible to the diff but was not in the locked set; lock those too.
+        late = [e.product_id for e in matched if e.product_id and e.product_id not in products]
+        if late:
+            products.update((p.id, p) for p in _lock_products(session, store_id, late))
         run = ImportRun(
             store_id=store_id,
             profile_id=profile.id,
@@ -585,12 +603,15 @@ def edit_price(
         raise TypeError("regular_cents must be an integer number of cents")
     if regular_cents < 0:
         raise ValueError("regular_cents must not be negative")
+    if regular_cents == 0:
+        raise ValueError("zero price: a shelf price must be above zero")
     if regular_cents > PRICE_CENTS_MAX:
         raise ValueError(f"regular_cents must be at most {PRICE_CENTS_MAX}")
     now = _check_now(now)
     with session.begin_nested():
-        price = _lock_price(session, product_id, store_id)
+        # Product before price, as in every writer (see apply_import).
         product = _lock_product(session, product_id, store_id)
+        price = _lock_price(session, product_id, store_id)
         old = price_state(price) if price is not None else None
         if old is not None and old.regular_cents == regular_cents:
             return None
@@ -697,8 +718,9 @@ def edit_product(
     fields.check()
     now = _check_now(now)
     with session.begin_nested():
-        price = _lock_price(session, product_id, store_id)
+        # Product before price, as in every writer (see apply_import).
         product = _lock_product(session, product_id, store_id)
+        price = _lock_price(session, product_id, store_id)
         old_fields = ProductFields.of(product)
         changed = _changed_fields(old_fields, fields)
         if not changed:

@@ -35,7 +35,7 @@ class CellError(ValueError):
 
 # --- Cell parsing ---------------------------------------------------------------------
 
-_NUMBER = re.compile(r"^\d+(?:[.,]\d+)*$")
+_NUMBER = re.compile(r"^[0-9]+(?:[.,][0-9]+)*$")
 
 
 def _split_number(text: str, max_decimals: int, what: str) -> tuple[str, str]:
@@ -132,7 +132,7 @@ def parse_pack_unit(text: str) -> tuple[PackUnit, int]:
     return _UNITS[key]
 
 
-_QTY_WITH_UNIT = re.compile(r"^\s*(\d[\d.,]*)\s*([^\d\s.,][^\d]*)?$")
+_QTY_WITH_UNIT = re.compile(r"^\s*([0-9][0-9.,]*)\s*([^\d\s.,][^\d]*)?$")
 
 
 def parse_pack(qty_text: str, unit_text: str = "") -> tuple[int, PackUnit] | None:
@@ -174,7 +174,7 @@ def parse_pack(qty_text: str, unit_text: str = "") -> tuple[int, PackUnit] | Non
     return milli, unit
 
 
-_SCIENTIFIC = re.compile(r"^\d+(?:[.,]\d+)?[eE][+-]?\d+$")
+_SCIENTIFIC = re.compile(r"^[0-9]+(?:[.,][0-9]+)?[eE][+-]?[0-9]+$")
 
 
 def ean_check_digit(body: str) -> int:

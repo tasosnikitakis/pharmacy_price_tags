@@ -106,6 +106,22 @@ def test_detect_falls_back_to_widest_header() -> None:
     assert detect_delimiter("a;b;c\n1;2\n3;4;5;6\n") == ";"
 
 
+def test_detect_with_quoted_line_breaks() -> None:
+    # A quoted note longer than the sample, full of commas, does not end a record.
+    note = "\n".join(f"γραμμή {i}, με κόμμα, και άλλο" for i in range(30))
+    text = f'ean;name;price;note\n1;Α;12,90;"{note}"\n2;Β;3,5;x\n'
+    assert detect_delimiter(text) == ";"
+    assert len(read_table(text.encode("utf-8")).rows) == 2
+
+
+def test_detect_with_unicode_line_separator_in_a_cell() -> None:
+    # str.splitlines() would split at U+2028; a CSV record does not.
+    text = 'ean,name,price\n1,Α Β,"12,90"\n2,Γ,"3,50"\n'
+    assert detect_delimiter(text) == ","
+    table = read_table(text.encode("utf-8"))
+    assert table.rows[0] == (2, ["1", "Α Β", "12,90"])
+
+
 def test_detect_refuses_single_column() -> None:
     with pytest.raises(ImportFormatError, match="single column"):
         detect_delimiter("ean\n1\n2\n")
@@ -262,28 +278,48 @@ _SIMPLE = {"ean": "ean", "name": "name", "price": "price"}
 _WITH_BRAND = {**_SIMPLE, "brand": "brand"}
 
 
+_SPLIT_FILE = (
+    "line 2: prices look like unquoted decimal commas \\(12,90\\); "
+    "re-export with quoted prices or a ';' delimiter"
+)
+
+
 def test_comma_trailing_delimiter_unquoted_decimal_is_rejected() -> None:
     # The trailing ',' gives the header a 4th column, so "12,90" fills exactly 4 cells.
     data = b"ean,name,price,\n2000000000015,Aloe,12,90\n"
-    parsed = parse_import(data, ImportSettings.create(_SIMPLE, delimiter=","))
-    assert parsed.rows == []
-    (rejected,) = parsed.rejected
-    assert rejected.line == 2
-    assert "looks like an unquoted decimal comma (12,90)" in rejected.reason
+    with pytest.raises(ImportFormatError, match=_SPLIT_FILE):
+        parse_import(data, ImportSettings.create(_SIMPLE, delimiter=","))
 
 
 def test_comma_unquoted_decimal_shifting_columns_is_rejected() -> None:
     # "12,90" splits into price "12" and name "90", and the real name lands in brand.
     data = b"ean,price,name,brand\n2000000000015,12,90,Aloe\n"
-    parsed = parse_import(data, ImportSettings.create(_WITH_BRAND, delimiter=","))
-    assert parsed.rows == []
-    assert "looks like an unquoted decimal comma" in parsed.rejected[0].reason
+    with pytest.raises(ImportFormatError, match=_SPLIT_FILE):
+        parse_import(data, ImportSettings.create(_WITH_BRAND, delimiter=","))
+
+
+def test_comma_split_price_rejects_the_whole_file() -> None:
+    # Line 2 lost its empty Notes cell, so "12,90" keeps the header's width and alone
+    # would import as 12,00 with Notes "90". Line 3 has its Notes cell and shows the
+    # split (one cell too many), so no row of this export can be trusted.
+    data = (
+        b"EAN,Name,Price,Notes\n"
+        b"2000000000015,Foo,12,90\n"
+        b"2000000000022,Bar,8,50,fragile\n"
+        b'2000000000039,Baz,"3,15",\n'
+    )
+    mapping = {"ean": "EAN", "name": "Name", "price": "Price"}
+    with pytest.raises(ImportFormatError, match="line 3: prices look like unquoted decimal"):
+        parse_import(data, ImportSettings.create(mapping, delimiter=","))
+    # Detection picks ',' for this file too, and refuses it the same way.
+    with pytest.raises(ImportFormatError, match="unquoted decimal commas"):
+        parse_import(data, ImportSettings.create(mapping))
 
 
 def test_comma_rows_of_another_width_are_rejected() -> None:
     data = (
         b"ean,name,price,brand\n"
-        b"2000000000015,Aloe,12,90,Test\n"  # one cell too many
+        b"2000000000015,Aloe,12,Test,extra\n"  # one cell too many, not a split price
         b"2000000000022,Oil,8\n"  # one cell short
         b'2000000000039,Paste,"3,15",\n'  # right width, quoted price
     )
@@ -438,6 +474,27 @@ def test_mapping_without_accents_matches_accented_header() -> None:
         codecs.BOM_UTF8 + (_GREEK_HEADER + "\r\n" + _GREEK_ROWS).encode("utf-8"),
     ):
         assert _greek_rows(data, unaccented) == _EXPECTED
+
+
+_DUP_MAPPING = {"ean": "Barcode", "name": "Περιγραφή", "price": "Τιμή"}
+
+
+@pytest.mark.parametrize("second", ["Τιμή", "ΤΙΜΗ", " τιμη "])
+def test_repeated_mapped_header_is_refused(second: str) -> None:
+    # Without the check the first "Τιμή" column wins and this imports at 5,10.
+    data = f"Barcode;Περιγραφή;Τιμή;{second}\r\n5901234123457;Κρέμα;5,10;8,90\r\n"
+    with pytest.raises(
+        ImportFormatError,
+        match=f"the header 'Τιμή' appears more than once, in columns 3 \\('Τιμή'\\) "
+        f"and 4 \\('{second.strip()}'\\)",
+    ):
+        parse_import(data.encode("cp1253"), ImportSettings.create(_DUP_MAPPING))
+
+
+def test_repeated_unmapped_header_is_fine() -> None:
+    data = "Barcode;Περιγραφή;Τιμή;Σημείωση;ΣΗΜΕΙΩΣΗ\r\n5901234123457;Κρέμα;5,10;α;β\r\n"
+    parsed = parse_import(data.encode("cp1253"), ImportSettings.create(_DUP_MAPPING))
+    assert [(r.ean, r.regular_cents) for r in parsed.rows] == [("5901234123457", 510)]
 
 
 def test_mapping_headers_equal_after_folding_are_refused() -> None:
