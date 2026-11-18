@@ -49,9 +49,8 @@ The Tags page uses the same statuses, including a "no label" filter.
   It sets no brand.
 
 **Audit walk.** It is read only. A tag is looked up by its short code or, ignoring case,
-by its `vendor_id`. Bound tags do not show their short code on screen, so auditing a
-bound tag needs a code printed on the tag or another lookup; this is an open question
-until the real tags arrive (M4).
+by its `vendor_id`. Bound tags do not show their short code on screen; they are
+audited by the product's barcode (decision 0018).
 
 **Expired sessions.** A logged-out form POST is refused before its body is read. A
 normal POST is redirected to `/login?next=…`, taken from a same-host `Referer`. An HTMX

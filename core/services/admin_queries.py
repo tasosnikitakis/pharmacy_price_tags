@@ -6,12 +6,12 @@ promotions, tags, queue, users), in their lock order.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Select, func, or_, select
 from sqlalchemy.orm import Session
 
 from core.db.models import (
@@ -23,6 +23,7 @@ from core.db.models import (
     Price,
     PriceHistory,
     Product,
+    RenderRow,
     Tag,
     TagTypeRow,
     Template,
@@ -82,6 +83,18 @@ def get_product(
         select(Product, Price)
         .outerjoin(Price, Price.product_id == Product.id)
         .where(Product.id == product_id, Product.store_id == store_id)
+    ).first()
+    return (row[0], row[1]) if row is not None else None
+
+
+def product_by_ean(
+    session: Session, ean: str, store_id: int = DEFAULT_STORE_ID
+) -> tuple[Product, Price | None] | None:
+    """The product with this (already normalised) EAN and its price, in one query."""
+    row = session.execute(
+        select(Product, Price)
+        .outerjoin(Price, Price.product_id == Product.id)
+        .where(Product.store_id == store_id, Product.ean == ean)
     ).first()
     return (row[0], row[1]) if row is not None else None
 
@@ -177,17 +190,15 @@ class TagRow:
         return job.id if job is not None and job.state == "dead" else None
 
 
-def tag_rows(
-    session: Session, store_id: int = DEFAULT_STORE_ID, tag_ids: Sequence[int] | None = None
-) -> list[TagRow]:
-    """Every tag (or the given ones) with its type, bound product and newest job, by
-    short code."""
+def _tag_rows_select(store_id: int) -> Select[tuple[Tag, TagTypeRow, Product, str, UpdateJob]]:
+    """Tags with their type, bound product, template key and newest job, by short code:
+    one statement, so a page of tags never needs a query per tag."""
     last_job = (
         select(UpdateJob.tag_id, func.max(UpdateJob.id).label("job_id"))
         .group_by(UpdateJob.tag_id)
         .subquery()
     )
-    stmt = (
+    return (
         select(Tag, TagTypeRow, Product, Template.key, UpdateJob)
         .join(TagTypeRow, TagTypeRow.id == Tag.tag_type_id)
         .outerjoin(Binding, Binding.tag_id == Tag.id)
@@ -198,12 +209,34 @@ def tag_rows(
         .where(Tag.store_id == store_id)
         .order_by(Tag.short_code)
     )
-    if tag_ids is not None:
-        stmt = stmt.where(Tag.id.in_(tag_ids))
+
+
+def _to_tag_rows(
+    session: Session, stmt: Select[tuple[Tag, TagTypeRow, Product, str, UpdateJob]]
+) -> list[TagRow]:
     return [
         TagRow(tag, tag_type, product, key, job)
         for tag, tag_type, product, key, job in session.execute(stmt).tuples()
     ]
+
+
+def tag_rows(
+    session: Session, store_id: int = DEFAULT_STORE_ID, tag_ids: Sequence[int] | None = None
+) -> list[TagRow]:
+    """Every tag (or the given ones) with its type, bound product and newest job, by
+    short code."""
+    stmt = _tag_rows_select(store_id)
+    if tag_ids is not None:
+        stmt = stmt.where(Tag.id.in_(tag_ids))
+    return _to_tag_rows(session, stmt)
+
+
+def product_tag_rows(
+    session: Session, product_id: int, store_id: int = DEFAULT_STORE_ID
+) -> list[TagRow]:
+    """Every tag bound to ``product_id``, as ``tag_rows`` gives them (by short code), in
+    one query whatever the number of tags (the audit page, decision 0018)."""
+    return _to_tag_rows(session, _tag_rows_select(store_id).where(Binding.product_id == product_id))
 
 
 def tag_row(session: Session, tag_id: int, store_id: int = DEFAULT_STORE_ID) -> TagRow | None:
@@ -275,6 +308,14 @@ def tag_jobs(session: Session, tag_id: int, limit: int = 10) -> list[UpdateJob]:
             .limit(limit)
         )
     )
+
+
+def stored_renders(session: Session, digests: Iterable[str | None]) -> set[str]:
+    """Which of ``digests`` have a PNG in the render store, in one query."""
+    wanted = {d for d in digests if d}
+    if not wanted:
+        return set()
+    return set(session.scalars(select(RenderRow.hash).where(RenderRow.hash.in_(wanted))))
 
 
 # --- Imports, gateway -----------------------------------------------------------------

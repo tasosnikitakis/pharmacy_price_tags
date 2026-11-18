@@ -1,0 +1,52 @@
+{# One tag on the audit page (decision 0018). ``sfx`` keeps element ids unique when a
+   product lists several tags; it is empty for a single tag lookup. #}
+{% macro audit_entry(e, sfx="", show_product=true) %}
+{% set row = e.row %}{% set tag = row.tag %}{% set preview = e.preview %}
+<section class="card audit-tag" aria-labelledby="audit-h{{ sfx }}" id="audit-result{{ sfx }}" data-code="{{ tag.short_code }}" data-status="{{ row.status.value }}">
+  <h2 id="audit-h{{ sfx }}">{{ t("audit.tag", code=tag.short_code) }}{% if row.template %} <span class="sub">· {{ t("template." + row.template) }}</span>{% endif %}</h2>
+  <p><span class="status status-{{ row.status.value }} big-status" id="audit-status{{ sfx }}">{{ t("tags.status." + row.status.value) }}</span></p>
+  {% if row.product %}
+  {% if show_product %}<p class="product-line" id="audit-product{{ sfx }}">{{ row.product.name }} · <span class="mono">{{ row.product.ean }}</span></p>{% endif %}
+  {% if preview and preview.label %}
+  <p class="big" id="audit-price{{ sfx }}">{{ preview.label.price_text }}</p>
+  {% if preview.label.prior_price_text %}<p class="sub">{{ t("audit.prior", price=preview.label.prior_price_text) }}</p>{% endif %}
+  {% if preview.label.unit_price_text %}<p class="sub">{{ preview.label.unit_price_text }}</p>{% endif %}
+  {% if preview.digest != tag.desired_hash %}<p class="flash flash-warning" id="audit-stale{{ sfx }}">{{ t("audit.label_behind") }}</p>{% endif %}
+  {% elif preview %}
+  <p class="flash flash-warning">{{ t("promo.refusal." + preview.refusal) if preview.refusal else t(preview.error or "preview.unavailable") }}</p>
+  {% endif %}
+  {% else %}
+  <p id="audit-product{{ sfx }}">{{ t("tags.unbound") }}</p>
+  {% endif %}
+
+  <h3>{{ t("audit.should_show") }}</h3>
+  {% if tag.desired_hash %}
+  <img class="label-preview" id="audit-label{{ sfx }}" width="{{ row.tag_type.width * 3 }}" height="{{ row.tag_type.height * 3 }}"
+       src="/tags/{{ tag.id }}/label/desired.png?v={{ tag.desired_hash }}" alt="{{ t('tags.detail.desired_alt', code=tag.short_code) }}">
+  {% else %}<p class="sub">{{ t("tags.detail.no_label") }}</p>{% endif %}
+
+  <h3>{{ t("audit.confirmed") }}</h3>
+  <div id="audit-confirmed{{ sfx }}" data-confirmed="{{ e.confirmed.value }}">
+  {% if e.confirmed.value == "same" %}
+  <p class="sub">{{ t("audit.confirmed.same") }}</p>
+  {% elif e.confirmed.value == "image" %}
+  <img class="label-preview" width="{{ row.tag_type.width * 3 }}" height="{{ row.tag_type.height * 3 }}"
+       src="/tags/{{ tag.id }}/label/displayed.png?v={{ tag.displayed_hash }}" alt="{{ t('tags.detail.displayed_alt', code=tag.short_code) }}">
+  {% elif e.confirmed.value == "not_kept" %}
+  <p class="flash flash-warning">{{ t("audit.confirmed.not_kept") }}</p>
+  {% else %}
+  <p class="flash flash-warning">{{ t("audit.confirmed.unknown") }}</p>
+  {% endif %}
+  </div>
+
+  <dl>
+    <dt>{{ t("tags.col.last_seen") }}</dt><dd id="audit-seen{{ sfx }}">{{ tag.last_seen_at | datetime_el if tag.last_seen_at else t("tags.never") }}</dd>
+    <dt>{{ t("tags.col.battery") }}</dt><dd id="audit-battery{{ sfx }}">{% if tag.battery_pct is not none %}{{ t("tags.battery_pct", value=tag.battery_pct) }}{% elif tag.battery_mv is not none %}{{ t("tags.battery_mv", value=tag.battery_mv) }}{% else %}{{ t("tags.unknown") }}{% endif %}</dd>
+    <dt>{{ t("tags.col.rssi") }}</dt><dd id="audit-rssi{{ sfx }}">{{ t("tags.rssi", value=tag.rssi) if tag.rssi is not none else t("tags.unknown") }}</dd>
+    {% if row.last_job and row.last_job.error_code and row.status.value in ("failed", "dead") %}
+    <dt>{{ t("tags.jobs.error") }}</dt><dd>{{ t("push_error." + row.last_job.error_code) }}</dd>
+    {% endif %}
+  </dl>
+  <p><a href="/tags/{{ tag.id }}">{{ t("bind.tag_details") }}</a></p>
+</section>
+{% endmacro %}

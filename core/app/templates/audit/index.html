@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_scan.html" import scan_button %}
+{% from "audit/_entry.html" import audit_entry %}
 {% block title %}{{ t("audit.title") }}{% endblock %}
 {% block content %}
 <div class="phone">
@@ -7,47 +8,29 @@
 <form method="get" action="/audit" class="big-form" id="audit-form">
   <label for="code">{{ t("audit.code.label") }}</label>
   <input id="code" name="code" value="" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="go" maxlength="64" required autofocus>
+  <p class="hint">{{ t("audit.code.hint") }}</p>
   <button type="submit" class="wide">{{ t("audit.check") }}</button>
 </form>
-{{ scan_button("code", "qr_code,code_128,data_matrix") }}
+{{ scan_button("code", "ean_13,ean_8,qr_code,code_128,data_matrix") }}
 
 {% if error %}<p class="flash flash-error" role="alert" id="audit-error">{{ error }}</p>{% endif %}
 
-{% if row %}
-{% set tag = row.tag %}
-<section class="card" aria-labelledby="audit-h" id="audit-result">
-  <h2 id="audit-h">{{ t("audit.tag", code=tag.short_code) }}</h2>
-  <p><span class="status status-{{ row.status.value }} big-status" id="audit-status">{{ t("tags.status." + row.status.value) }}</span></p>
-  {% if row.product %}
-  <p class="product-line" id="audit-product">{{ row.product.name }} · <span class="mono">{{ row.product.ean }}</span></p>
-  {% if preview and preview.label %}
-  <p class="big" id="audit-price">{{ preview.label.price_text }}</p>
-  {% if preview.label.prior_price_text %}<p class="sub">{{ t("audit.prior", price=preview.label.prior_price_text) }}</p>{% endif %}
-  {% if preview.label.unit_price_text %}<p class="sub">{{ preview.label.unit_price_text }}</p>{% endif %}
-  {% if preview.digest != tag.desired_hash %}<p class="flash flash-warning" id="audit-stale">{{ t("audit.label_behind") }}</p>{% endif %}
-  {% elif preview %}
-  <p class="flash flash-warning">{{ t("promo.refusal." + preview.refusal) if preview.refusal else t(preview.error or "preview.unavailable") }}</p>
-  {% endif %}
+{% if mode == "product" %}
+<section class="card product-summary" aria-labelledby="audit-product-h" id="audit-product">
+  <h2 id="audit-product-h">{{ product.name }}</h2>
+  <p class="product-line"><span class="mono">{{ product.ean }}</span>{% if price %} · <strong id="audit-product-price">{{ price.regular_cents | money }}</strong>{% endif %}</p>
+  {% if price and promo_running %}<p id="audit-product-promo">{{ t("audit.product.promo", price=price.promo_cents | money) }}</p>{% endif %}
+  {% if not price %}<p class="sub">{{ t("preview.no_price") }}</p>{% endif %}
+  {% if entries %}
+  <p id="audit-count">{{ t("audit.product.tag_count", count=entries | length) }}</p>
   {% else %}
-  <p id="audit-product">{{ t("tags.unbound") }}</p>
+  <p class="flash flash-info" id="audit-no-tags">{{ t("audit.product.no_tags") }}</p>
+  <p><a class="button-link primary wide" id="audit-bind" href="/bind?ean={{ product.ean | urlencode }}">{{ t("audit.product.bind") }}</a></p>
   {% endif %}
-
-  <h3>{{ t("audit.should_show") }}</h3>
-  {% if tag.desired_hash %}
-  <img class="label-preview" id="audit-label" width="{{ row.tag_type.width * 3 }}" height="{{ row.tag_type.height * 3 }}"
-       src="/tags/{{ tag.id }}/label/desired.png?v={{ tag.desired_hash }}" alt="{{ t('tags.detail.desired_alt', code=tag.short_code) }}">
-  {% else %}<p class="sub">{{ t("tags.detail.no_label") }}</p>{% endif %}
-
-  <dl>
-    <dt>{{ t("tags.col.last_seen") }}</dt><dd id="audit-seen">{{ tag.last_seen_at | datetime_el if tag.last_seen_at else t("tags.never") }}</dd>
-    <dt>{{ t("tags.col.battery") }}</dt><dd id="audit-battery">{% if tag.battery_pct is not none %}{{ t("tags.battery_pct", value=tag.battery_pct) }}{% elif tag.battery_mv is not none %}{{ t("tags.battery_mv", value=tag.battery_mv) }}{% else %}{{ t("tags.unknown") }}{% endif %}</dd>
-    <dt>{{ t("tags.col.rssi") }}</dt><dd id="audit-rssi">{{ t("tags.rssi", value=tag.rssi) if tag.rssi is not none else t("tags.unknown") }}</dd>
-    {% if row.last_job and row.last_job.error_code and row.status.value in ("failed", "dead") %}
-    <dt>{{ t("tags.jobs.error") }}</dt><dd>{{ t("push_error." + row.last_job.error_code) }}</dd>
-    {% endif %}
-  </dl>
-  <p><a href="/tags/{{ tag.id }}">{{ t("bind.tag_details") }}</a></p>
 </section>
+{% for e in entries %}{{ audit_entry(e, "-" ~ e.row.tag.short_code, show_product=false) }}{% endfor %}
+{% elif mode == "tag" %}
+{{ audit_entry(entries[0]) }}
 {% endif %}
 </div>
 {% endblock %}
