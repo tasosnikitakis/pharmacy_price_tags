@@ -105,6 +105,18 @@ def test_gateway_settings_require_token(monkeypatch: pytest.MonkeyPatch, tmp_pat
         load_gateway_settings()
 
 
+def test_gateway_token_with_surrounding_whitespace_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from gateway.config import GatewayConfigError, load_gateway_settings
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CORE_URL", "http://localhost:8000")
+    monkeypatch.setenv("GATEWAY_TOKEN", secrets.token_hex(32) + "\r")
+    with pytest.raises(GatewayConfigError, match=r"GATEWAY_TOKEN: .*whitespace"):
+        load_gateway_settings()
+
+
 def test_generated_secrets_pass_validation() -> None:
     from core.gen_secrets import generate
 

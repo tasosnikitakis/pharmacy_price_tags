@@ -385,6 +385,53 @@ def test_re_entering_identical_prior_price_with_no_other_change_is_logged() -> N
     assert [e.kind for e in change.events].count("promo.prior_set") == 1
 
 
+def test_import_after_promo_expired_drops_it_silently() -> None:
+    """A promo ended two days ago is still stored. An import carries it through
+    unchanged: it is dropped, with no refusal and no events."""
+    old = PriceState(1000, 800, T0 - timedelta(days=9), T0 - timedelta(days=2))
+    requested = PriceState(950, 800, T0 - timedelta(days=9), T0 - timedelta(days=2))
+    change = apply_price_change(_product(), old, requested, [_point(1000, 60)], T0,
+                                PriceSource.IMPORT)  # fmt: skip
+    assert change.state == PriceState(950)
+    assert change.events == []
+
+
+def test_leaving_promo_out_of_a_write_ends_it() -> None:
+    start = T0 - timedelta(days=2)
+    old = PriceState(1000, 800, start, T0 + timedelta(days=5), promo_prior_cents=1000)
+    change = apply_price_change(_product(), old, PriceState(1000), [_point(1000, 10)], T0,
+                                PriceSource.MANUAL)  # fmt: skip
+    assert change.state == PriceState(1000)
+    assert [e.kind for e in change.events] == ["promo.prior_cleared"]
+
+
+def test_new_promo_ending_before_now_is_an_invalid_period() -> None:
+    """A typo: a scheduled promo whose end is already past."""
+    requested = PriceState(1000, 800, T0 + timedelta(days=1), T0 - timedelta(hours=1))
+    with pytest.raises(PromoRefused) as exc:
+        apply_price_change(_product(), PriceState(1000), requested, [_point(1000, 60)], T0,
+                           PriceSource.MANUAL)  # fmt: skip
+    assert exc.value.reason is PromoRefusal.INVALID_PERIOD
+
+
+def test_promo_removed_by_revalidation_also_clears_manual_prior() -> None:
+    """Short history, manual prior 12,00, promo 9,00 running; an import sets regular
+    to 8,50: the promo is removed and its manual prior price is cleared and logged."""
+    start = T0 - timedelta(days=2)
+    old = PriceState(1000, 900, start, T0 + timedelta(days=5), promo_prior_cents=1200)
+    requested = PriceState(850, 900, start, T0 + timedelta(days=5))
+    change = apply_price_change(_product(), old, requested, [_point(1000, 10)], T0,
+                                PriceSource.IMPORT)  # fmt: skip
+    assert change.state == PriceState(850)
+    assert sorted(e.kind for e in change.events) == ["promo.prior_cleared", "promo.refused"]
+
+
+def test_entered_prior_without_a_promo_is_an_error() -> None:
+    with pytest.raises(ValueError):
+        apply_price_change(_product(), PriceState(1000), PriceState(1000), [], T0,
+                           PriceSource.MANUAL, entered_prior_cents=1200)  # fmt: skip
+
+
 def test_next_label_change() -> None:
     price = PriceState(1000, 800, T0, T0 + timedelta(days=7))
     assert next_label_change(price, T0 - timedelta(days=1)) == T0

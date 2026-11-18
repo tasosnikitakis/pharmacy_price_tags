@@ -134,27 +134,43 @@ def apply_price_change(
     promo edit. Callers store exactly what it returns, in one transaction, with the
     ``price`` row locked (see ``history_rows_for_change``). Rules, in order:
 
-    0. An expired promo in ``old`` (``old.promo_to <= now``) counts as no promo: a
-       request carrying it again is a new promo.
-    1. ``promo_from`` is a timestamp, not a date. Every promo in ``requested`` must
-       have ``promo_from >= now`` (a promo "from today" starts when it is saved: the
-       caller passes ``promo_from = now``), otherwise ``STARTS_IN_PAST``, with one
-       exception: a promo that is running at ``now`` in ``old``
-       (``old.promo_from <= now < old.promo_to``) and keeps the same ``promo_from``
-       may have ``promo_to`` or ``promo_cents`` edited. Its prior price is still
-       computed for its original ``promo_from``, so editing a running promo never pulls
-       its own price into its 30-day window. A repriced promo is validated like any
-       other: the new ``promo_cents`` must stay strictly below that original prior
-       price and the current regular price, or the edit is refused. A
-       ``requested.promo_to <= now`` ends the
-       promo now: it is removed from ``state``.
+    How callers express intent: ``requested`` is the full new ``price`` row. To leave
+    the promo alone (an import, or an edit of the regular price only) the caller copies
+    ``old``'s promo fields into ``requested`` unchanged. Leaving them out means "end the
+    promo". The promo in ``requested`` is *unchanged* when ``promo_cents``,
+    ``promo_from`` and ``promo_to`` all equal ``old``'s, otherwise *changed*.
+
+    0. Housekeeping: an unchanged promo that has expired (``promo_to <= now``) is
+       dropped from ``state`` with no refusal and no ``promo.refused`` event (only
+       ``promo.prior_cleared`` if it had a manual prior price, per rule 2). An expired
+       promo in ``old`` counts as no promo for the rules below.
+    1. Promo start and end (``promo_from`` is a timestamp, not a date):
+
+       a. No promo in ``requested`` while ``old`` has a running or scheduled one: the
+          promo ends now.
+       b. A promo running at ``now`` in ``old`` (``old.promo_from <= now <
+          old.promo_to``) whose ``promo_from`` stays the same may have ``promo_to`` or
+          ``promo_cents`` changed. ``requested.promo_to <= now`` ends it now (it is
+          removed from ``state``). Its prior price is still computed for its original
+          ``promo_from``, so editing a running promo never pulls its own price into its
+          30-day window. A new ``promo_cents`` must stay strictly below that original
+          prior price and the current regular price, or the edit is refused.
+       c. Any other changed promo is a new one: it needs ``promo_from >= now`` (a promo
+          "from today" starts when it is saved: the caller passes ``promo_from = now``),
+          else ``STARTS_IN_PAST``; and ``promo_to > promo_from``, else
+          ``INVALID_PERIOD``.
+
     2. The manual prior price. ``requested.promo_prior_cents`` is ignored as input.
        ``entered_prior_cents`` is what an admin typed in this request: when given it is
        always accepted and stored, and always logged as ``promo.prior_set`` with the
        amount and the promo it belongs to, even if it equals the stored value. When not
        given, the stored ``old.promo_prior_cents`` is kept only while the promo is
        unchanged; if ``promo_cents``, ``promo_from`` or ``promo_to`` change, or the
-       promo ends, it is cleared and ``promo.prior_cleared`` is logged.
+       promo ends or is removed by any rule here (0, 1 or 3), it is cleared and
+       ``promo.prior_cleared`` is logged. ``entered_prior_cents`` without a promo in
+       the resulting ``state`` raises ``ValueError``. An entered prior price is stored
+       even when history covers the 30-day window; ``resolve_prior_price`` then uses
+       history.
     3. Any promo left in ``state``, running or scheduled, is re-validated with
        ``validate_promo`` against ``history`` plus the rows this change appends. This
        covers changes the request did not make to the promo itself, such as an import
@@ -162,15 +178,22 @@ def apply_price_change(
        or lowers the 30-day low before a scheduled promo (``NOT_A_DISCOUNT``). If it is
        refused, the promo is removed from ``state`` at ``now`` and a ``promo.refused``
        event carries the reason. So a refused promo never reaches ``price_history`` as a
-       shelf price.
+       shelf price. The order is safe: the history row this change writes at ``now`` is
+       the regular price for a scheduled promo either way, and lies after
+       ``promo_from`` (outside the window) for a running one, so validating before or
+       after deciding to keep the promo gives the same result. A promo removed here
+       on an import or a regular-price edit is not an error; the caller shows the
+       ``promo.refused`` event to the admin.
     4. ``history_rows`` come from ``history_rows_for_change(state, now, source)``.
 
-    Raises ``PromoRefused`` when ``requested`` itself adds or changes a promo that
-    ``validate_promo`` refuses, or one that starts in the past: an edit is rejected,
-    not silently dropped. Every validation in this function, of the requested promo and
-    of a scheduled one, uses the same history: ``history`` plus the rows this change
-    appends, read with the override rule of ``PricePoint`` (so rows of a cancelled
-    scheduled promo never lower a prior price).
+    Raises ``PromoRefused`` when ``requested`` itself changes the promo (rule 1b or 1c)
+    in a way that is refused: ``STARTS_IN_PAST``, ``INVALID_PERIOD`` or any
+    ``validate_promo`` reason. An edit is rejected, not silently dropped. An unchanged
+    promo is never a reason to raise: rules 0 and 3 remove it instead. Every
+    validation in this function, of the requested promo and of a scheduled one, uses
+    the same history: ``history`` plus the rows this change appends, read with the
+    override rule of ``PricePoint`` (so rows of a cancelled scheduled promo never lower
+    a prior price).
     """
     raise NotImplementedError
 

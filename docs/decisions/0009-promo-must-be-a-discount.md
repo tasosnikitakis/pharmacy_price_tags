@@ -16,16 +16,17 @@ manual prior price is higher than today's regular price.
 - `promo_from` is a timestamp. A promo "from today" starts when it is saved, and a
   promo that would start in the past is refused (`STARTS_IN_PAST`). The 30-day window
   ends at the moment the promo takes effect, so a price drop earlier the same day counts.
-- Editing a running promo (lead's reading of the rule above, awaiting Tasos's
-  confirmation): the past-start check is waived only for a promo that is running now
-  and keeps its `promo_from`. Its end or price may be edited; the history-based prior
-  price is unchanged and the promo's own price never enters its window. A new promo
-  price must still be strictly below that original prior price and the current regular
-  price. A manual prior
-  price counts as cleared by the edit, like any promo change, so the admin re-enters it
+- Editing a running promo (approved by Tasos on 18 November 2026): the past-start
+  check is waived only for a promo that is running now and keeps its `promo_from`. Its
+  end or price may be edited; the history-based prior price is unchanged and the
+  promo's own price never enters its window. A new promo price must still be strictly
+  below that original prior price and the current regular price. A manual prior price
+  counts as cleared by the edit, like any promo change, so the admin re-enters it
   (workstream E pre-fills it). Setting `promo_to` to now or earlier removes the promo.
-  An expired promo cannot be revived this way: carrying it again is a new promo, whose
+  An expired promo cannot be revived this way: changing it makes it a new promo, whose
   start must not be in the past.
+- An import or a regular-price edit carries the stored promo through unchanged; an
+  expired one is then dropped silently. Leaving the promo out of a write ends it.
 - Every write re-validates every running or scheduled promo; a promo that has become
   unlawful (for example an import lowered the regular price below it) is removed at
   that moment and logged as `promo.refused`.
