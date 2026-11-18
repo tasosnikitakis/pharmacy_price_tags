@@ -130,8 +130,13 @@ def claim(
     pipeline: PipelineDep,
 ) -> ClaimResponse:
     # Scheduled promo starts and ends first, so their new labels can be handed out in
-    # this same claim (decision 0014).
-    refresh_promo_boundaries(session, pipeline, now)
+    # this same claim (decision 0014). A failure there must never stop the claim: it is
+    # rolled back to its savepoint, logged, and tried again on the next claim.
+    try:
+        with session.begin_nested():
+            refresh_promo_boundaries(session, pipeline, now)
+    except Exception as exc:
+        log.warning("promo boundary check failed (%s); claiming anyway", type(exc).__name__)
     jobs = claim_jobs(session, gateway_id, body.max_jobs, now)
     session.commit()
     return ClaimResponse(jobs=jobs)

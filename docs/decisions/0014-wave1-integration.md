@@ -39,7 +39,16 @@ promo_to`) or ended (`promo_from <= changed_at < promo_to <= now`). Consequences
   does not move `desired_hash_changed_at`, and moving it without a change would revive
   dead jobs (decision 0007).
 - A tag whose label cannot be built at the boundary (a refused promo, a renderer
-  error) is retried on each claim until the promo flips back; each attempt is logged.
+  error) keeps matching, so it is retried on every claim. At a start that lasts until
+  a label is built or the promo ends; at an end it lasts until a label is built, for
+  example after a write fixes the product (that write's own refresh then moves
+  `desired_hash_changed_at`). Only the first failure per tag is logged as a warning;
+  repeats are logged at debug level until the tag's label is built again (an
+  in-process set, so a restart logs one warning again).
+- The check never stops a claim. It runs in a savepoint; if refreshing all matching
+  tags at once fails, each is refreshed in its own savepoint, so one bad tag does not
+  hold the others back. Any other failure is rolled back, logged with its exception
+  type, and the claim hands out jobs as usual.
 - Tags with no `desired_hash_changed_at` (no label was ever built) are skipped.
 - The query scans the `price` rows with a started promo, joined to `binding` by its
   `product_id` index and to `tag` by key: cheap for a few thousand rows. There is no
@@ -52,16 +61,31 @@ promo_to`) or ended (`promo_from <= changed_at < promo_to <= now`). Consequences
 order, each step in id order:
 
 1. `store` (imports only, serialising imports), `FOR NO KEY UPDATE`;
-2. `product` rows, `FOR NO KEY UPDATE`;
+2. `product` rows: `FOR NO KEY UPDATE` by catalogue writers, `FOR SHARE` by `bind_tag`;
 3. `price` rows, `FOR NO KEY UPDATE`;
 4. `tag` rows, `FOR NO KEY UPDATE`;
 5. `update_job` rows, `FOR UPDATE`.
 
-Catalogue writers take 1–3, then 4–5 through the refresh at the end. The queue,
-discovery, gateway results, `bind_tag` and the claim take only 4–5 and never lock a
-store, product or price row; they read those rows without locks, and their foreign-key
-checks take `FOR KEY SHARE`, which `FOR NO KEY UPDATE` does not block. So no
-transaction waits for a lower step while holding a higher one, and there is no cycle.
+Catalogue writers take 1–3, then 4–5 through the refresh at the end. `bind_tag` takes
+2 (the product it binds to and, on a rebind, the one the tag leaves, in id order), then
+4–5. The queue, discovery, gateway results and the claim take only 4–5 and never lock
+a store, product or price row; they read those rows without locks, and their
+foreign-key checks take `FOR KEY SHARE`, which `FOR NO KEY UPDATE` does not block. So
+no transaction waits for a lower step while holding a higher one, and there is no
+cycle. (A rebind re-reads the binding under the tag lock; if a concurrent rebind moved
+the tag meanwhile, the product it now leaves is not locked, because that would be a
+product lock after a tag lock. It needs none: a writer on that product locks the tag
+and waits for the bind.)
+
+**A bind waits for an open write on its product.** `FOR SHARE` conflicts with the
+writers' `FOR NO KEY UPDATE`. Without it, a bind could render the last committed price
+while an edit of that product was still open, and the edit's refresh, which only sees
+committed bindings, would miss the new tag: the tag kept the old price until the next
+write. Now a bind during an open price, product or import write on that product waits
+for it to commit and renders the new price; a write that starts after a bind waits for
+the bind, then refreshes the newly bound tag itself. Binds to the same product do not
+wait for each other (`FOR SHARE` is shared); binds of the same tag are serialised by the
+tag lock.
 The claim takes its tag locks with `SKIP LOCKED`; it can only wait briefly for a job
 row that another claim locked (which itself waits for nothing) or for a concurrent
 insert of the same render hash. Tested with real connections in

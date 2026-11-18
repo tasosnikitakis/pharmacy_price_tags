@@ -157,9 +157,10 @@ def refresh_desired_hashes(
         try:
             outcome = pipeline(request, now)
         except (ValueError, PromoRefused) as exc:
-            log.warning("label for tag %s cannot be built: %s", tag.id, exc)
+            _log_label_failure(tag.id, exc)
             result.failed.append(tag.id)
             continue
+        _failing_tags.discard(tag.id)
         rendered = outcome.render
         if rendered.tag_type_key != request.tag_type.key:
             raise ValueError(f"render for tag {tag.id} is for another tag type")
@@ -177,6 +178,22 @@ def refresh_desired_hashes(
     session.flush()
     reconcile(session, now, [t.id for t in tags])
     return result
+
+
+#: Tags whose last label build failed, in this process. A failing tag is retried on
+#: every refresh (a promo boundary keeps matching until its label can be built), so
+#: only its first failure is logged as a warning; repeats go to debug until a success.
+_failing_tags: set[int] = set()
+
+
+def _log_label_failure(tag_id: int, exc: BaseException) -> None:
+    if tag_id in _failing_tags:
+        log.debug("label for tag %s still cannot be built (%s)", tag_id, type(exc).__name__)
+        return
+    _failing_tags.add(tag_id)
+    # The message only for the expected errors; an unexpected one may carry SQL.
+    detail = f": {exc}" if isinstance(exc, ValueError | PromoRefused) else ""
+    log.warning("label for tag %s cannot be built (%s)%s", tag_id, type(exc).__name__, detail)
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +266,29 @@ def refresh_promo_boundaries(
     )
     if not locked:
         return RefreshResult()
-    return refresh_desired_hashes(session, pipeline, now, tag_ids=locked)
+    try:
+        with session.begin_nested():
+            return refresh_desired_hashes(session, pipeline, now, tag_ids=locked)
+    except Exception as exc:
+        # Rolled back to the savepoint. One bad tag must not hold the others back,
+        # so refresh them one by one; the failing ones are retried on the next claim.
+        log.debug("promo boundary refresh of tags %s failed (%s)", locked, type(exc).__name__)
+    result = RefreshResult()
+    for tag_id in locked:
+        try:
+            with session.begin_nested():
+                one = refresh_desired_hashes(session, pipeline, now, tag_ids=[tag_id])
+        except Exception as exc:
+            _log_label_failure(tag_id, exc)
+            result.failed.append(tag_id)
+            continue
+        result.changed += one.changed
+        result.failed += one.failed
+        if one.next_change is not None and (
+            result.next_change is None or one.next_change < result.next_change
+        ):
+            result.next_change = one.next_change
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -295,13 +334,31 @@ def bind_tag(
     """Bind a tag to a product (or rebind it), log ``tag.bound`` and refresh its label.
 
     The template is the bound *key*; ``effective_template`` still picks ``promo`` or
-    ``unit_price`` when the product needs it. Locks the tag first (``FOR NO KEY
-    UPDATE``), then its jobs through ``refresh_desired_hashes``; the binding's
-    foreign keys only take ``FOR KEY SHARE`` on the product, which a catalogue writer's
-    product lock does not block, so binding never waits for an import.
+    ``unit_price`` when the product needs it.
+
+    Locks, in the catalogue's order (decision 0014): the product, and on a rebind the
+    product the tag leaves, ``FOR SHARE`` in id order; then the tag ``FOR NO KEY
+    UPDATE``; then its jobs through ``refresh_desired_hashes``. ``FOR SHARE`` conflicts
+    with the ``FOR NO KEY UPDATE`` every catalogue writer takes on a product, so a bind
+    waits for an open price or product write on that product to commit and then renders
+    the new price; and a writer that starts after the bind waits for it, then sees the
+    committed binding and refreshes the tag itself. Either way the tag never keeps a
+    price older than the last committed write.
     """
     if template is TemplateKey.UNASSIGNED:
         raise BindingError("the unassigned template is for unbound tags only")
+    leaving = session.scalar(select(Binding.product_id).where(Binding.tag_id == tag_id))
+    product_ids = sorted({product_id} | ({leaving} if leaving is not None else set()))
+    locked = set(
+        session.scalars(
+            select(Product.id)
+            .where(Product.id.in_(product_ids), Product.store_id == DEFAULT_STORE_ID)
+            .order_by(Product.id)
+            .with_for_update(read=True)
+        )
+    )
+    if product_id not in locked:
+        raise BindingError(f"product {product_id} not found")
     tag = session.scalars(
         select(Tag)
         .where(Tag.id == tag_id, Tag.store_id == DEFAULT_STORE_ID)
@@ -309,13 +366,13 @@ def bind_tag(
     ).one_or_none()
     if tag is None:
         raise BindingError(f"tag {tag_id} not found")
-    product = session.scalar(
-        select(Product.id).where(Product.id == product_id, Product.store_id == DEFAULT_STORE_ID)
-    )
-    if product is None:
-        raise BindingError(f"product {product_id} not found")
+    # Re-read under the tag lock: a concurrent rebind may have committed meanwhile. Its
+    # product is not locked here (that would take a product lock after a tag lock); it
+    # needs none, because a writer on it locks this tag and waits for this bind.
     template_id = template_row(session, tag.tag_type_id, template).id
-    binding = session.scalars(select(Binding).where(Binding.tag_id == tag_id)).one_or_none()
+    binding = session.scalars(
+        select(Binding).where(Binding.tag_id == tag_id).execution_options(populate_existing=True)
+    ).one_or_none()
     previous = binding.product_id if binding is not None else None
     if binding is None:
         binding = Binding(store_id=DEFAULT_STORE_ID, tag_id=tag_id)

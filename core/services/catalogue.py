@@ -17,10 +17,12 @@ transaction: ``store`` (imports only), then ``product``, then ``price`` rows, th
 ``tag`` rows, then ``update_job`` rows. The queue and gateway code takes only the last
 two, in the same order, and never locks a store, product or price row (it reads them
 without locks; foreign-key checks take ``FOR KEY SHARE``, which the catalogue's ``FOR NO
-KEY UPDATE`` does not block). So there is no cycle between a catalogue writer and the
-queue. An import holds its tag locks while it renders every affected label (one render
-per bound tag, before commit); a gateway result for one of those tags waits for the
-import, and a claim skips them (``SKIP LOCKED``). That is accepted for v1.
+KEY UPDATE`` does not block). ``bind_tag`` locks its products ``FOR SHARE`` before the
+tag, so a bind waits for an open write on its product and vice versa. So there is no
+cycle between a catalogue writer, a bind and the queue. An import holds its tag locks
+while it renders every affected label (one render per bound tag, before commit); a
+gateway result for one of those tags waits for the import, and a claim skips them
+(``SKIP LOCKED``). That is accepted for v1.
 """
 
 from __future__ import annotations

@@ -459,3 +459,162 @@ def test_promo_boundary_ignores_unbound_tags_and_tags_without_a_label(shop: Shop
     t3.desired_hash_changed_at = None  # as if no label was ever built
     shop.db.flush()
     assert promo_boundary_tags(shop.db, later) == []
+
+
+# --- Failures at a boundary, promo edits and rebinds ------------------------------------
+
+
+def _failing_for(shop: Shop, vendor_id: str, exc: Exception) -> list[int]:
+    """Make the shop's pipeline raise ``exc`` for one tag; returns the list that the
+    tag's attempts are recorded in."""
+    tag_id = shop.tag(vendor_id).id
+    real = shop.pipeline.inner
+    attempts: list[int] = []
+
+    def pipeline(request: LabelRequest, now: datetime) -> LabelOutcome:
+        if request.tag_id == tag_id:
+            attempts.append(tag_id)
+            raise exc
+        return real(request, now)
+
+    shop.pipeline.inner = pipeline
+    return attempts
+
+
+def test_claim_hands_out_jobs_when_the_boundary_refresh_raises(
+    shop: Shop, client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    _shown(shop, client, ("T1", EAN_A), ("T3", EAN_B))
+    start = shop.clock.now + timedelta(minutes=1)
+    write_promo(shop.db, shop.product(EAN_B).id, 590, start, start + timedelta(days=1),
+                prior_cents=690, now=shop.clock.now, pipeline=shop.pipeline)  # fmt: skip
+    shop.clock.now = start - timedelta(seconds=5)
+    svc.edit_price(shop.db, shop.product(EAN_A).id, 2390, actor="test", now=shop.clock.now,
+                   pipeline=shop.pipeline)  # fmt: skip
+    regular = shop.tag("T3").desired_hash
+    real = shop.pipeline.inner
+    attempts = _failing_for(shop, "T3", RuntimeError("renderer crashed"))
+
+    shop.clock.now = start + timedelta(seconds=5)
+    with caplog.at_level("WARNING", logger="core.services.tags"):
+        jobs = _claim(client)
+    assert [j["vendor_id"] for j in jobs] == ["T1"]  # the other job still goes out
+    assert attempts and shop.tag("T3").desired_hash == regular
+    assert any(
+        f"tag {shop.tag('T3').id}" in r.getMessage() and "RuntimeError" in r.getMessage()
+        for r in caplog.records
+    )
+
+    shop.pipeline.inner = real  # fixed: the next claim switches T3 to the promo
+    shop.clock.now += timedelta(minutes=1)
+    [job] = _claim(client)
+    assert job["vendor_id"] == "T3" and shop.tag("T3").desired_hash != regular
+
+
+def test_a_failing_promo_end_is_retried_and_logged_once(
+    shop: Shop, client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    _shown(shop, client, ("T3", EAN_B))
+    end = shop.clock.now + timedelta(hours=1)
+    write_promo(shop.db, shop.product(EAN_B).id, 590, shop.clock.now, end, prior_cents=690,
+                now=shop.clock.now, pipeline=shop.pipeline)  # fmt: skip
+    _ack_all(client)
+    promo = shop.tag("T3").desired_hash
+    real = shop.pipeline.inner
+    attempts = _failing_for(shop, "T3", ValueError("no price"))
+
+    shop.clock.now = end + timedelta(seconds=1)
+    with caplog.at_level("DEBUG", logger="core.services.tags"):
+        for _ in range(3):
+            assert _claim(client) == []
+            shop.clock.now += timedelta(minutes=1)
+    assert len(attempts) == 3  # retried on every claim: a later fix heals it
+    t3 = shop.tag("T3").id
+    mine = [r for r in caplog.records if f"tag {t3} " in r.getMessage()]
+    assert [r.levelname for r in mine] == ["WARNING", "DEBUG", "DEBUG"]
+
+    shop.pipeline.inner = real
+    [job] = _claim(client)
+    assert job["vendor_id"] == "T3" and shop.tag("T3").desired_hash != promo
+    caplog.clear()
+    _failing_for(shop, "T3", ValueError("broken again"))
+    with caplog.at_level("WARNING", logger="core.services.tags"):
+        shop.clock.now += timedelta(minutes=1)
+        svc.edit_price(shop.db, shop.product(EAN_B).id, 790, actor="test", now=shop.clock.now,
+                       pipeline=shop.pipeline)  # fmt: skip
+    assert [r.levelname for r in caplog.records if f"tag {t3} " in r.getMessage()] == [
+        "WARNING"
+    ]  # after a success, the next failure is a warning again
+
+
+def test_running_promo_edited_without_a_label_change(shop: Shop, client: TestClient) -> None:
+    # Moving a running promo's end by an hour on the same day leaves the label as it is,
+    # so desired_hash_changed_at stays at the start; the old end must not match, the
+    # new one must.
+    _shown(shop, client, ("T3", EAN_B))
+    start = shop.clock.now  # 08:00 UTC, 10:00 in Athens
+    end = start + timedelta(hours=4)
+    product = shop.product(EAN_B).id
+    write_promo(shop.db, product, 590, start, end, prior_cents=690, now=start,
+                pipeline=shop.pipeline)  # fmt: skip
+    _ack_all(client)
+    promo = shop.tag("T3")
+    promo_hash, shown_since = promo.desired_hash, promo.desired_hash_changed_at
+    shop.clock.now = start + timedelta(hours=1)
+    new_end = end + timedelta(hours=1)
+    refreshed = write_promo(shop.db, product, 590, start, new_end, prior_cents=690,
+                            now=shop.clock.now, pipeline=shop.pipeline)  # fmt: skip
+    assert refreshed.changed == []
+    assert shop.tag("T3").desired_hash_changed_at == shown_since
+    shop.pipeline.calls.clear()
+
+    shop.clock.now = end + timedelta(seconds=1)  # the old end: nothing
+    assert _claim(client) == [] and shop.pipeline.calls == []
+    shop.clock.now = new_end + timedelta(seconds=1)  # the new end: back to regular
+    [job] = _claim(client)
+    assert job["vendor_id"] == "T3" and shop.tag("T3").desired_hash != promo_hash
+
+
+def test_promo_removed_by_revalidation_is_not_a_boundary(shop: Shop, client: TestClient) -> None:
+    _shown(shop, client, ("T3", EAN_B))
+    start = shop.clock.now + timedelta(hours=1)
+    product = shop.product(EAN_B).id
+    write_promo(shop.db, product, 590, start, start + timedelta(days=1), prior_cents=690,
+                now=shop.clock.now, pipeline=shop.pipeline)  # fmt: skip
+    # A lower regular price makes the scheduled promo unlawful; it is removed now.
+    svc.edit_price(shop.db, product, 500, actor="test", now=shop.clock.now,
+                   pipeline=shop.pipeline)  # fmt: skip
+    price = shop.db.get_one(Price, product)
+    shop.db.refresh(price)
+    assert price.promo_from is None
+    _ack_all(client)
+    lowered = shop.tag("T3").desired_hash
+    shop.pipeline.calls.clear()
+
+    shop.clock.now = start + timedelta(seconds=1)
+    assert promo_boundary_tags(shop.db, shop.clock.now) == []
+    assert _claim(client) == [] and shop.pipeline.calls == []
+    assert shop.tag("T3").desired_hash == lowered
+
+
+def test_rebind_during_a_promo(shop: Shop, client: TestClient) -> None:
+    _shown(shop, client, ("T1", EAN_A), ("T3", EAN_B))
+    end = shop.clock.now + timedelta(hours=2)
+    write_promo(shop.db, shop.product(EAN_B).id, 590, shop.clock.now, end, prior_cents=690,
+                now=shop.clock.now, pipeline=shop.pipeline)  # fmt: skip
+    _ack_all(client)
+    b_promo = shop.tag("T3").desired_hash
+    a_regular = shop.tag("T1").desired_hash
+
+    shop.clock.now += timedelta(minutes=30)
+    shop.bind("T3", EAN_A)  # T3 leaves the promo product
+    shop.bind("T1", EAN_B)  # T1 joins it: shows the promo at once
+    assert shop.tag("T3").desired_hash == a_regular
+    assert shop.tag("T1").desired_hash == b_promo
+    _ack_all(client)
+    shop.pipeline.calls.clear()
+
+    shop.clock.now = end + timedelta(seconds=1)  # the end concerns T1 only now
+    [job] = _claim(client)
+    assert job["vendor_id"] == "T1" and shop.pipeline.calls == [shop.tag("T1").id]
+    assert shop.tag("T1").desired_hash != b_promo
