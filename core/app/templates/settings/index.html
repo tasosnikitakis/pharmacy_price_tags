@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}{{ t("settings.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t("settings.title") }}</h1>
+
+<section class="card" aria-labelledby="users-h">
+  <h2 id="users-h">{{ t("settings.users.title") }}</h2>
+  <div class="table-wrap"><table>
+    <thead><tr>
+      <th scope="col">{{ t("settings.users.email") }}</th>
+      <th scope="col">{{ t("settings.users.role") }}</th>
+      <th scope="col">{{ t("settings.users.status") }}</th>
+      <th scope="col">{{ t("settings.users.actions") }}</th>
+    </tr></thead>
+    <tbody>
+    {% for u in users %}
+      <tr{% if not u.active %} class="muted"{% endif %}>
+        <td>{{ u.email }}</td>
+        <td>{{ t("role." + u.role) }}</td>
+        <td>{{ t("settings.users.active") if u.active else t("settings.users.inactive") }}</td>
+        <td>
+          {% if u.id != user.id or not u.active %}
+          <form method="post" action="/settings/users/{{ u.id }}/active" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if u.active %}
+            <button type="submit" class="danger">{{ t("settings.users.deactivate") }}</button>
+            {% else %}
+            <input type="hidden" name="active" value="true">
+            <button type="submit" class="secondary">{{ t("settings.users.activate") }}</button>
+            {% endif %}
+          </form>
+          {% endif %}
+          <details>
+            <summary>{{ t("settings.users.reset_password") }}</summary>
+            <form method="post" action="/settings/users/{{ u.id }}/password" class="stack">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label for="pw-{{ u.id }}">{{ t("settings.users.new_password") }}</label>
+              <input id="pw-{{ u.id }}" name="password" type="password" autocomplete="new-password" minlength="10" required>
+              <label for="pw2-{{ u.id }}">{{ t("settings.users.password_again") }}</label>
+              <input id="pw2-{{ u.id }}" name="password_again" type="password" autocomplete="new-password" minlength="10" required>
+              <button type="submit">{{ t("settings.users.save_password") }}</button>
+            </form>
+          </details>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+
+  <h3>{{ t("settings.users.add") }}</h3>
+  {% if error %}<p class="flash flash-error" role="alert">{{ error_message(error) }}</p>{% endif %}
+  <form method="post" action="/settings/users" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="new-email">{{ t("settings.users.email") }}</label>
+    <input id="new-email" name="email" type="email" autocomplete="off" required value="{{ values.get('email', '') }}">
+    <label for="new-role">{{ t("settings.users.role") }}</label>
+    <select id="new-role" name="role">
+      {% for role in roles %}<option value="{{ role }}"{% if values.get('role', 'staff') == role %} selected{% endif %}>{{ t("role." + role) }}</option>{% endfor %}
+    </select>
+    <label for="new-pw">{{ t("settings.users.password") }}</label>
+    <input id="new-pw" name="password" type="password" autocomplete="new-password" minlength="10" required>
+    <label for="new-pw2">{{ t("settings.users.password_again") }}</label>
+    <input id="new-pw2" name="password_again" type="password" autocomplete="new-password" minlength="10" required>
+    <p class="hint">{{ t("settings.users.password_hint") }}</p>
+    <button type="submit">{{ t("settings.users.add_submit") }}</button>
+  </form>
+</section>
+
+<section class="card" aria-labelledby="gateway-h">
+  <h2 id="gateway-h">{{ t("settings.gateway.title") }}</h2>
+  <p>{{ t("settings.gateway.token_configured") if token_configured else t("settings.gateway.token_missing") }}</p>
+  <p class="hint">{{ t("settings.gateway.token_hint") }}</p>
+  {% if gateways %}
+  <dl>
+  {% for g in gateways %}
+    <dt>{{ t("settings.gateway.name") }}</dt><dd>{{ g.name }}</dd>
+    <dt>{{ t("settings.gateway.last_heartbeat") }}</dt><dd>{{ g.last_heartbeat_at | datetime_el if g.last_heartbeat_at else t("settings.gateway.never") }}</dd>
+    <dt>{{ t("settings.gateway.driver") }}</dt><dd>{{ g.driver or t("settings.gateway.unknown") }}</dd>
+    <dt>{{ t("settings.gateway.version") }}</dt><dd>{{ g.version or t("settings.gateway.unknown") }}</dd>
+  {% endfor %}
+  </dl>
+  {% else %}
+  <p>{{ t("settings.gateway.none") }}</p>
+  {% endif %}
+</section>
+
+<section class="card" aria-labelledby="thresholds-h">
+  <h2 id="thresholds-h">{{ t("settings.thresholds.title") }}</h2>
+  <dl>
+    <dt>{{ t("settings.thresholds.stale") }}</dt><dd>{{ t("settings.thresholds.days", days=stale_import_days) }}</dd>
+    <dt>{{ t("settings.thresholds.last_import") }}</dt><dd>{{ last_import_at | datetime_el if last_import_at else t("settings.thresholds.no_import") }}</dd>
+    <dt>{{ t("settings.thresholds.warn") }}</dt><dd>{{ t("settings.thresholds.percent", value=warn_percent) }}</dd>
+    <dt>{{ t("settings.thresholds.banner") }}</dt><dd>{{ t("settings.thresholds.percent", value=banner_percent) }}</dd>
+    <dt>{{ t("settings.thresholds.timezone") }}</dt><dd>{{ timezone }}</dd>
+  </dl>
+  <p class="hint">{{ t("settings.thresholds.env_hint") }}</p>
+</section>
+{% endblock %}

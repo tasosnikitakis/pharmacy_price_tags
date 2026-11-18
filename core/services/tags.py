@@ -399,6 +399,57 @@ def bind_tag(
     return refresh_desired_hashes(session, pipeline, now, tag_ids=[tag_id])
 
 
+def unbind_tag(
+    session: Session,
+    tag_id: int,
+    *,
+    actor: str,
+    now: datetime,
+    pipeline: LabelPipeline = real_label_pipeline,
+) -> RefreshResult | None:
+    """Remove a tag's binding, log ``tag.unbound`` and refresh the tag to its
+    "unassigned" label (added by workstream E for the Tags page).
+
+    Locks in the order of ``bind_tag`` (decision 0014): the bound product ``FOR
+    SHARE``, then the tag ``FOR NO KEY UPDATE``, then its jobs through
+    ``refresh_desired_hashes``. Returns ``None`` and writes nothing when the tag is
+    not bound. Raises ``BindingError`` for an unknown tag.
+    """
+    product_id = session.scalar(select(Binding.product_id).where(Binding.tag_id == tag_id))
+    if product_id is not None:
+        session.execute(
+            select(Product.id)
+            .where(Product.id == product_id, Product.store_id == DEFAULT_STORE_ID)
+            .with_for_update(read=True)
+        )
+    tag = session.scalars(
+        select(Tag)
+        .where(Tag.id == tag_id, Tag.store_id == DEFAULT_STORE_ID)
+        .with_for_update(key_share=True)
+    ).one_or_none()
+    if tag is None:
+        raise BindingError(f"tag {tag_id} not found")
+    # Re-read under the tag lock, as in bind_tag: a concurrent rebind may have moved it.
+    binding = session.scalars(
+        select(Binding).where(Binding.tag_id == tag_id).execution_options(populate_existing=True)
+    ).one_or_none()
+    if binding is None:
+        return None
+    previous = binding.product_id
+    session.delete(binding)
+    session.add(
+        EventLog(
+            store_id=DEFAULT_STORE_ID,
+            at=now,
+            actor=actor,
+            kind="tag.unbound",
+            payload={"tag_id": tag_id, "previous_product_id": previous},
+        )
+    )
+    session.flush()
+    return refresh_desired_hashes(session, pipeline, now, tag_ids=[tag_id])
+
+
 def _log_promo_refused(
     session: Session, bound: BoundProduct, reason: PromoRefusal, now: datetime
 ) -> None:

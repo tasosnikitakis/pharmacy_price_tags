@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ t("error.title") }}{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>{{ t("error.title") }}</h1>
+  <p class="flash flash-error" role="alert">{{ error_message(code) }}</p>
+  <p><a href="/">{{ t("error.back") }}</a></p>
+</section>
+{% endblock %}
