@@ -33,10 +33,15 @@ def home(_: Annotated[object, Depends(require_user)]) -> Response:
 
 
 @router.get("/login")
-def login_page(request: Request, session: SessionDep, next: str = "/") -> Response:
+def login_page(
+    request: Request, session: SessionDep, next: str = "/", changed: str = ""
+) -> Response:
     if session_user(request, session) is not None:
         return redirect(safe_next(next))
-    return render(request, "login.html", {"next": safe_next(next), "email": ""})
+    # ?changed=1: the user just reset their own password, which ended their session
+    # (and its flash messages), so the page says so itself.
+    context = {"next": safe_next(next), "email": "", "password_changed": changed == "1"}
+    return render(request, "login.html", context)
 
 
 @router.post("/login")

@@ -82,6 +82,7 @@ def N_(key: str, /) -> str:
 ERROR_CODES: tuple[str, ...] = (
     "auth.invalid_credentials",
     "auth.forbidden",
+    "auth.login_required",
     "csrf.invalid",
     "not_found",
     "invalid_input",
@@ -98,6 +99,8 @@ ERROR_CODES: tuple[str, ...] = (
     "promo.rx",
     "promo.price_invalid",
     "promo.dates_invalid",
+    "promo.date_out_of_range",
+    "request.too_large",
     "promo.prior_invalid",
     "import.no_file",
     "import.file_too_large",

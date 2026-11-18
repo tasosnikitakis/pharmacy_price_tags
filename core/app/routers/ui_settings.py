@@ -22,6 +22,7 @@ from core.app.web import (
     check_csrf,
     flash,
     flash_error,
+    log_out,
     redirect,
     render,
 )
@@ -139,8 +140,10 @@ def change_password(
         flash_error(request, exc.code)
         return redirect("/settings")
     session.commit()
-    flash(request, "success", N_("settings.users.password_reset"), email=changed.email)
     if changed.id == user.id:
-        # The session is tied to the old password; the admin logs in again.
-        return redirect("/login")
+        # The session is tied to the old password and ends, flash messages with it;
+        # the login page shows the message from the query flag instead.
+        log_out(request)
+        return redirect("/login?changed=1")
+    flash(request, "success", N_("settings.users.password_reset"), email=changed.email)
     return redirect("/settings")

@@ -14,7 +14,8 @@ The user row is read on every request, so a deactivated user is logged out at on
 **CSRF.** Every state-changing request (``POST`` and friends) must carry the session's
 token, as the ``csrf_token`` form field or, from HTMX, the ``X-CSRF-Token`` header
 (set on ``<body hx-headers>``). Checked by ``check_csrf``, a dependency of every UI
-router.
+router. Before any body is read, ``UiGuard`` refuses a request whose session has no
+token or no user, and caps the body size; it also sets the anti-framing headers.
 """
 
 from __future__ import annotations
@@ -38,11 +39,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from core.app import formatting, import_messages
 from core.app.i18n import LANGUAGE, error_message, t
 from core.app.routers.gateway import get_label_pipeline, get_now
+from core.app.uploads import MAX_BYTES as MAX_UPLOAD_BYTES
 from core.config import get_settings
 from core.db.models import AppUser
 from core.db.session import get_session
 from core.services.tags import LabelPipeline
 from core.services.users import get_user
+from shared.gateway_api import API_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -246,6 +249,94 @@ def not_found() -> HTTPException:
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+# --- Early request checks and frame headers --------------------------------------------
+
+#: Largest request body the UI accepts: an import upload plus the form around it.
+MAX_REQUEST_BYTES = MAX_UPLOAD_BYTES + 1024 * 1024
+#: Sent with every UI response, so no other site can frame the admin UI.
+FRAME_HEADERS = (
+    (b"x-frame-options", b"DENY"),
+    (b"content-security-policy", b"frame-ancestors 'none'"),
+)
+
+
+def _is_ui_path(path: str) -> bool:
+    return not (path.startswith(API_PREFIX) or path == "/health")
+
+
+class UiGuard:
+    """ASGI middleware inside ``SessionMiddleware`` for the admin UI (not the gateway API).
+
+    - Adds ``FRAME_HEADERS`` to every response (clickjacking).
+    - Refuses a state-changing request before its body is read: 403 when the session
+      has no CSRF token or, except for ``POST /login``, no logged-in user; 413 when
+      ``Content-Length`` is over ``max_bytes``. While the body is read, it is cut off
+      at ``max_bytes`` too (413), whatever the headers said. The CSRF token itself and
+      the role are checked later, by ``check_csrf`` and the route.
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int = MAX_REQUEST_BYTES) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not _is_ui_path(scope["path"]):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in FRAME_HEADERS:
+                    headers[name.decode()] = value.decode()
+            await send(message)
+
+        if scope["method"] in _SAFE_METHODS:
+            await self.app(scope, receive, send_with_headers)
+            return
+        refusal = self._refusal(scope)
+        if refusal is not None:
+            code, status_code = refusal
+            log.warning(
+                "ui request refused early (%s): %s %s", code, scope["method"], scope["path"]
+            )
+            response = Response(
+                f"<!doctype html><title>{t('error.title')}</title><p>{error_message(code)}</p>",
+                status_code=status_code,
+                media_type="text/html; charset=utf-8",
+            )
+            await response(scope, receive, send_with_headers)
+            return
+        await self.app(scope, self._capped(receive), send_with_headers)
+
+    def _refusal(self, scope: Scope) -> tuple[str, int] | None:
+        length = dict(scope.get("headers") or []).get(b"content-length")
+        if length is not None and (not length.isdigit() or int(length) > self.max_bytes):
+            return "request.too_large", status.HTTP_413_CONTENT_TOO_LARGE
+        session = scope.get("session") or {}
+        if not isinstance(session.get("csrf"), str):
+            return "csrf.invalid", status.HTTP_403_FORBIDDEN
+        if scope["path"] != "/login" and not isinstance(session.get("uid"), int):
+            return "auth.login_required", status.HTTP_403_FORBIDDEN
+        return None
+
+    def _capped(self, receive: Receive) -> Receive:
+        received = 0
+        limit = self.max_bytes
+
+        async def capped() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    # Raised inside the app; FastAPI passes HTTPException through.
+                    raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE)
+            return message
+
+        return capped
 
 
 # --- Secure cookie over HTTPS ---------------------------------------------------------

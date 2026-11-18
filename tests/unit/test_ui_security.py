@@ -92,6 +92,79 @@ async def test_secure_flag_only_over_https() -> None:
     assert secured[0].endswith(b"; secure") and secured[1] == b"other=1; path=/"
 
 
+async def _guard(
+    method: str,
+    session: dict[str, object],
+    chunks: list[bytes],
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> tuple[int, list[tuple[bytes, bytes]], int]:
+    """Run ``UiGuard`` (limit 100 bytes) around an app that reads the whole body.
+    Returns the status, the response headers and how many body bytes the app read."""
+    from fastapi import HTTPException
+
+    from core.app.web import UiGuard
+
+    read = 0
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        nonlocal read
+        try:
+            while True:
+                message = await receive()
+                read += len(message.get("body", b""))
+                if not message.get("more_body"):
+                    break
+            status = 200
+        except HTTPException as exc:
+            status = exc.status_code
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    pending = [
+        {"type": "http.request", "body": c, "more_body": i < len(chunks) - 1}
+        for i, c in enumerate(chunks)
+    ]
+
+    async def receive() -> Message:
+        return pending.pop(0)
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: Scope = {"type": "http", "method": method, "path": "/import/preview",
+                    "headers": headers or [], "session": session}  # fmt: skip
+    await UiGuard(app, max_bytes=100)(scope, receive, send)
+    return sent[0]["status"], sent[0]["headers"], read
+
+
+LOGGED_IN: dict[str, object] = {"csrf": "token", "uid": 1}
+
+
+async def test_guard_refuses_before_reading_the_body() -> None:
+    status, headers, read = await _guard("POST", {}, [b"x" * 50])
+    assert (status, read) == (403, 0)  # no CSRF token in the session
+    assert (b"x-frame-options", b"DENY") in headers
+    status, _, read = await _guard("POST", {"csrf": "token"}, [b"x" * 50])
+    assert (status, read) == (403, 0)  # nobody logged in
+    status, _, read = await _guard("POST", LOGGED_IN, [b"x"], [(b"content-length", b"101")])
+    assert (status, read) == (413, 0)
+
+
+async def test_guard_cuts_off_a_streamed_body() -> None:
+    status, _, read = await _guard("POST", LOGGED_IN, [b"x" * 60, b"x" * 60, b"x" * 60])
+    assert status == 413 and read == 60  # stopped at the chunk that went over
+    status, _, read = await _guard("POST", LOGGED_IN, [b"x" * 60, b"x" * 40])
+    assert (status, read) == (200, 100)
+
+
+async def test_guard_passes_reads_with_frame_headers() -> None:
+    status, headers, _ = await _guard("GET", {}, [b""])
+    assert status == 200
+    assert (b"content-security-policy", b"frame-ancestors 'none'") in headers
+
+
 @pytest.mark.parametrize(
     ("target", "expected"),
     [("/tags", "/tags"), ("/products?q=a", "/products?q=a"), ("//evil.example", "/"),

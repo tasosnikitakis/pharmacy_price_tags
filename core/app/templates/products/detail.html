@@ -86,17 +86,27 @@
     <label for="promo_price">{{ t("products.promo.price") }}</label>
     <input id="promo_price" name="promo_price" inputmode="decimal" required autocomplete="off"
            value="{{ values.get('promo_price', promo.cents | cents_input) }}">
+    {% if promo.running %}
+    {# A running promo keeps its start (decision 0009): it is sent unchanged, not edited. #}
+    <input type="hidden" name="start" value="{{ promo.start | date_input }}">
+    <p id="start-fixed"><strong>{{ t("products.promo.start") }}:</strong> {{ t("products.promo.running_since", date=promo.start | date_el) }}</p>
+    <p class="hint">{{ t("products.promo.running_hint") }}</p>
+    {% else %}
     <label for="start">{{ t("products.promo.start") }}</label>
-    <input id="start" name="start" type="date" min="{{ promo.today | date_input }}"
+    <input id="start" name="start" type="date" min="{{ promo.today | date_input }}" max="{{ promo.max_day | date_input }}"
            value="{{ values.get('start', (promo.start or promo.today) | date_input) }}">
     <p class="hint">{{ t("products.promo.start_hint") }}</p>
+    {% endif %}
     <label for="last">{{ t("products.promo.last_day") }}</label>
-    <input id="last" name="last" type="date" required min="{{ promo.today | date_input }}"
+    <input id="last" name="last" type="date" required min="{{ promo.today | date_input }}" max="{{ promo.max_day | date_input }}"
            value="{{ values.get('last', promo.last_day | date_input) }}">
     <label for="prior_price">{{ t("products.promo.prior") }}</label>
     <input id="prior_price" name="prior_price" inputmode="decimal" autocomplete="off"
-           value="{{ values.get('prior_price', promo.prior_cents | cents_input) }}">
+           value="{{ values.get('prior_price', promo.prior_cents | cents_input if promo.running else '') }}">
     <p class="hint">{{ t("products.promo.prior_hint") }}</p>
+    {% if promo.prior_cents is not none and not promo.running %}
+    <p class="hint" id="prior-previous">{{ t("products.promo.prior_previous", price=promo.prior_cents | money) }}</p>
+    {% endif %}
     <button type="submit">{{ t("products.promo.save") }}</button>
   </form>
   {% if promo.has_promo %}

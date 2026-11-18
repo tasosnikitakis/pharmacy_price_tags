@@ -60,6 +60,8 @@ def _add_admin_ui(app: FastAPI, session_secret: str) -> None:
     for module in (ui_auth, ui_products, ui_import, ui_tags, ui_settings):
         app.include_router(module.router)
     app.mount("/static", StaticFiles(directory=web.APP_DIR / "static"), name="static")
+    # Added first, so it runs inside SessionMiddleware and sees the session.
+    app.add_middleware(web.UiGuard)
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret,
@@ -97,4 +99,6 @@ def _add_admin_ui(app: FastAPI, session_secret: str) -> None:
         ui = not (path.startswith(API_PREFIX) or path == "/health" or path.startswith("/static"))
         if ui and exc.status_code == status.HTTP_404_NOT_FOUND:
             return _error_page(request, "not_found", exc.status_code)
+        if ui and exc.status_code == status.HTTP_413_CONTENT_TOO_LARGE:
+            return _error_page(request, "request.too_large", exc.status_code)
         return await http_exception_handler(request, exc)

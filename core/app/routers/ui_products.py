@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -59,6 +59,11 @@ from core.services.promotions import (
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/products", dependencies=[Depends(check_csrf)], include_in_schema=False)
+
+#: How far ahead a typed promo date may lie; later dates are refused as out of range.
+PROMO_MAX_AHEAD = timedelta(days=5 * 365 + 1)
+#: How far back a typed date may lie (an earlier start is refused as in the past anyway).
+PROMO_MAX_BEHIND = timedelta(days=366)
 
 
 class FormError(Exception):
@@ -145,14 +150,16 @@ def _promo_form(price: Price, now: datetime, tz: Any) -> dict[str, Any]:
     state = price_state(price)
     has_promo = state.promo_cents is not None and state.promo_to is not None
     current = has_promo and state.promo_to is not None and state.promo_to > now
+    today = now.astimezone(tz).date()
     return {
+        "max_day": today + PROMO_MAX_AHEAD,
         "has_promo": current,
         "running": current and promo_active(state, now),
         "cents": state.promo_cents if current else None,
         "start": state.promo_from.astimezone(tz).date() if current and state.promo_from else None,
         "last_day": last_day(state.promo_to, tz) if current and state.promo_to else None,
         "prior_cents": state.promo_prior_cents if current else None,
-        "today": now.astimezone(tz).date(),
+        "today": today,
     }
 
 
@@ -326,15 +333,20 @@ def update_fields(
     return redirect(f"/products/{product_id}")
 
 
-def _date(text: str, required: bool) -> date | None:
+def _date(text: str, required: bool, today: date) -> date | None:
+    """A date from the form, within ``PROMO_MAX_BEHIND`` and ``PROMO_MAX_AHEAD`` of
+    ``today`` (a far-off date would overflow the datetime range)."""
     if not text.strip():
         if required:
             raise FormError("promo.dates_invalid", "promo")
         return None
     try:
-        return date.fromisoformat(text.strip())
+        day = date.fromisoformat(text.strip())
     except ValueError:
         raise FormError("promo.dates_invalid", "promo") from None
+    if not today - PROMO_MAX_BEHIND <= day <= today + PROMO_MAX_AHEAD:
+        raise FormError("promo.date_out_of_range", "promo")
+    return day
 
 
 @router.post("/{product_id}/promo")
@@ -364,8 +376,9 @@ def update_promo(
             prior = formatting.parse_cents(prior_price)
             if prior is None or prior == 0 or prior > PRICE_CENTS_MAX:
                 raise FormError("promo.prior_invalid", "promo")
-        start_day = _date(start, required=False)
-        last_day_ = _date(last, required=True)
+        today = now.astimezone(tz).date()
+        start_day = _date(start, required=False, today=today)
+        last_day_ = _date(last, required=True, today=today)
         assert last_day_ is not None
         old = price_state(price) if price is not None else None
         promo = PromoInput(cents, promo_start(old, start_day, now, tz), promo_end(last_day_, tz))
@@ -389,8 +402,14 @@ def update_promo(
             request, session, product_id, now, error=error, values=values, status_code=422
         )
     session.commit()
+    removed_refused = result.change is not None and any(
+        e.kind == "promo.refused" for e in result.change.events
+    )
     if result.change is None:
         flash(request, "info", N_("products.promo.unchanged"))
+    elif removed_refused:
+        # Rule 3 removed the promo on re-validation: show why, not "ended".
+        _flash_price_events(request, result.change)
     elif result.promo_removed:
         flash(request, "success", N_("products.promo.ended"))
     else:
