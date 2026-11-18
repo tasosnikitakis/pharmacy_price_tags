@@ -1,5 +1,4 @@
-"""Reconciler and update-job state machine (workstream C). Placeholders until
-implemented: remove the ``xfail`` marker as functions land."""
+"""Reconciler and update-job state machine (workstream C)."""
 
 from __future__ import annotations
 
@@ -24,8 +23,6 @@ from core.domain.reconciler import (
     reclaim_stale,
 )
 from shared.gateway_api import JobOutcome, PushErrorCode
-
-pytestmark = pytest.mark.xfail(raises=NotImplementedError, reason="workstream C")
 
 NOW = datetime(2026, 12, 1, 8, 0, tzinfo=UTC)
 OLD, NEW = "a" * 64, "b" * 64

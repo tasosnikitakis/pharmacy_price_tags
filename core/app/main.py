@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from core.app.routers import gateway as gateway_router
 from core.config import get_settings
 from core.db.session import get_session
 
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
     # Fail fast: a missing or weak secret stops the process before it serves anything.
     get_settings()
     app = FastAPI(title="Pharmacy ESL core", version=VERSION)
+    app.include_router(gateway_router.router)
 
     @app.get("/health", response_model=Health)
     def health(response: Response, session: Annotated[Session, Depends(get_session)]) -> Health:
