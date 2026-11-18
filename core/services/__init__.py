@@ -1,1 +1,1 @@
-"""Database-facing services that apply domain rules with SQLAlchemy sessions."""
+"""Application services: the database-facing side of the domain and renderer."""
