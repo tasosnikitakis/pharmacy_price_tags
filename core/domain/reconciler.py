@@ -55,6 +55,12 @@ BACKOFF: tuple[timedelta, ...] = tuple(timedelta(minutes=m) for m in (1, 5, 15, 
 MAX_ATTEMPTS = 6  # 1 initial push + 5 retries, one per BACKOFF step
 CLAIM_TIMEOUT = timedelta(minutes=5)
 
+#: ``error`` written when a claim times out without a result.
+STALE_CLAIM_ERROR = "no result within the claim timeout; the push may have landed"
+
+#: Failure codes after which the tag may show the new image anyway.
+_MAY_HAVE_LANDED = frozenset({PushErrorCode.TIMEOUT, PushErrorCode.PROTOCOL})
+
 
 class JobState(StrEnum):
     QUEUED = "queued"
@@ -86,6 +92,10 @@ class JobSnapshot:
     next_attempt_at: datetime | None
     claimed_at: datetime | None
     created_at: datetime
+    # Current values, so transitions that keep them can carry them through.
+    gateway_id: int | None = None
+    error_code: PushErrorCode | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +170,46 @@ def plan_updates(
     most one ``dead`` job per tag. Every cancel comes before the create for the same
     tag in the returned list.
     """
-    raise NotImplementedError
+    active_by_tag: dict[int, JobSnapshot] = {}
+    for job in active_jobs:
+        if job.state not in ACTIVE_STATES:
+            raise ValueError(f"job {job.job_id} is {job.state}, not active")
+        if job.tag_id in active_by_tag:
+            raise ValueError(f"tag {job.tag_id} has more than one active job")
+        active_by_tag[job.tag_id] = job
+    dead_by_tag: dict[int, JobSnapshot] = {}
+    for dead in latest_dead:
+        if dead.state is not JobState.DEAD:
+            raise ValueError(f"job {dead.job_id} in latest_dead is {dead.state}")
+        if dead.tag_id in dead_by_tag:
+            raise ValueError(f"tag {dead.tag_id} has more than one latest dead job")
+        dead_by_tag[dead.tag_id] = dead
+
+    actions: list[Action] = []
+    for tag in tags:
+        active = active_by_tag.get(tag.tag_id)
+        desired = tag.desired_hash
+        if desired is None or desired == tag.displayed_hash:
+            if active is not None and active.state is not JobState.CLAIMED:
+                actions.append(CancelJob(active.job_id))
+            continue
+        if active is None:
+            if not _suppressed_by_dead(tag, desired, dead_by_tag.get(tag.tag_id)):
+                actions.append(CreateJob(tag.tag_id, desired))
+        elif active.render_hash == desired or active.state is JobState.CLAIMED:
+            continue
+        else:
+            actions.append(CancelJob(active.job_id))
+            actions.append(CreateJob(tag.tag_id, desired))
+    return actions
+
+
+def _suppressed_by_dead(tag: TagSnapshot, desired: str, dead: JobSnapshot | None) -> bool:
+    """True while the tag's latest dead job is for ``desired`` and not stale."""
+    if dead is None or dead.render_hash != desired:
+        return False
+    changed_at = tag.desired_hash_changed_at
+    return changed_at is None or dead.created_at >= changed_at
 
 
 def claim(job: JobSnapshot, gateway_id: int, now: datetime) -> JobTransition:
@@ -169,7 +218,18 @@ def claim(job: JobSnapshot, gateway_id: int, now: datetime) -> JobTransition:
 
     Raises ``ValueError`` unless the job is ``queued``.
     """
-    raise NotImplementedError
+    if job.state is not JobState.QUEUED:
+        raise ValueError(f"job {job.job_id} is {job.state}, only queued jobs can be claimed")
+    return JobTransition(
+        job_id=job.job_id,
+        state=JobState.CLAIMED,
+        attempts=job.attempts + 1,
+        next_attempt_at=None,
+        claimed_at=now,
+        gateway_id=gateway_id,
+        error_code=None,
+        error=None,
+    )
 
 
 def apply_result(
@@ -192,7 +252,39 @@ def apply_result(
     (a late result after a reclaim, or a duplicate). Raises ``ValueError`` if a failure
     has no code or an ack has one.
     """
-    raise NotImplementedError
+    if job.state is not JobState.CLAIMED or job.attempts != attempt:
+        raise StaleResult(
+            f"job {job.job_id} is {job.state} at attempt {job.attempts}; "
+            f"result for attempt {attempt} is not current"
+        )
+    if outcome is JobOutcome.ACKED:
+        if error_code is not None:
+            raise ValueError("an acked result has no error_code")
+        return JobTransition(
+            job_id=job.job_id,
+            state=JobState.ACKED,
+            attempts=job.attempts,
+            next_attempt_at=None,
+            claimed_at=job.claimed_at,
+            gateway_id=job.gateway_id,
+            error_code=None,
+            error=None,
+            set_displayed_hash=job.render_hash,
+        )
+    if error_code is None:
+        raise ValueError("a failed result needs an error_code")
+    retry_at = next_attempt_at(job.attempts, now)
+    return JobTransition(
+        job_id=job.job_id,
+        state=JobState.FAILED if retry_at is not None else JobState.DEAD,
+        attempts=job.attempts,
+        next_attempt_at=retry_at,
+        claimed_at=job.claimed_at,
+        gateway_id=job.gateway_id,
+        error_code=error_code,
+        error=error,
+        displayed_hash_unknown=error_code in _MAY_HAVE_LANDED,
+    )
 
 
 def next_attempt_at(attempts: int, now: datetime) -> datetime | None:
@@ -201,7 +293,11 @@ def next_attempt_at(attempts: int, now: datetime) -> datetime | None:
     ``now + BACKOFF[attempts - 1]`` while ``attempts < MAX_ATTEMPTS``; ``None`` (dead)
     otherwise. Raises ``ValueError`` if ``attempts < 1``.
     """
-    raise NotImplementedError
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    if attempts >= MAX_ATTEMPTS:
+        return None
+    return now + BACKOFF[attempts - 1]
 
 
 def due_retries(jobs: Sequence[JobSnapshot], now: datetime) -> list[JobTransition]:
@@ -210,7 +306,22 @@ def due_retries(jobs: Sequence[JobSnapshot], now: datetime) -> list[JobTransitio
     ``next_attempt_at`` and ``claimed_at`` are cleared; ``attempts`` and the last
     error are kept so monitoring can show why the job is being retried.
     """
-    raise NotImplementedError
+    return [
+        JobTransition(
+            job_id=job.job_id,
+            state=JobState.QUEUED,
+            attempts=job.attempts,
+            next_attempt_at=None,
+            claimed_at=None,
+            gateway_id=None,
+            error_code=job.error_code,
+            error=job.error,
+        )
+        for job in jobs
+        if job.state is JobState.FAILED
+        and job.next_attempt_at is not None
+        and job.next_attempt_at <= now
+    ]
 
 
 def reclaim_stale(jobs: Sequence[JobSnapshot], now: datetime) -> list[JobTransition]:
@@ -220,7 +331,22 @@ def reclaim_stale(jobs: Sequence[JobSnapshot], now: datetime) -> list[JobTransit
     ``attempts >= MAX_ATTEMPTS``, to ``dead``. ``error_code`` becomes ``timeout`` and
     ``displayed_hash_unknown`` is set: the lost push may have landed.
     """
-    raise NotImplementedError
+    cutoff = now - CLAIM_TIMEOUT
+    return [
+        JobTransition(
+            job_id=job.job_id,
+            state=JobState.DEAD if job.attempts >= MAX_ATTEMPTS else JobState.QUEUED,
+            attempts=job.attempts,
+            next_attempt_at=None,
+            claimed_at=None,
+            gateway_id=None,
+            error_code=PushErrorCode.TIMEOUT,
+            error=STALE_CLAIM_ERROR,
+            displayed_hash_unknown=True,
+        )
+        for job in jobs
+        if job.state is JobState.CLAIMED and job.claimed_at is not None and job.claimed_at <= cutoff
+    ]
 
 
 def admin_retry(
@@ -236,4 +362,12 @@ def admin_retry(
     ``ValueError`` if ``dead_job`` is not ``dead`` or belongs to another tag. The caller
     logs ``job.retry`` in ``event_log``.
     """
-    raise NotImplementedError
+    if dead_job.state is not JobState.DEAD:
+        raise ValueError(f"job {dead_job.job_id} is {dead_job.state}, not dead")
+    if dead_job.tag_id != tag.tag_id:
+        raise ValueError(f"job {dead_job.job_id} belongs to tag {dead_job.tag_id}")
+    if active_job is not None or tag.desired_hash is None:
+        return []
+    if tag.desired_hash == tag.displayed_hash:
+        return []
+    return [CreateJob(tag.tag_id, tag.desired_hash)]
