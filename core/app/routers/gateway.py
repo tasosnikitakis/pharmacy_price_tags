@@ -31,6 +31,7 @@ from core.services.tags import (
     real_label_pipeline,
     record_heartbeat,
     record_seen_tags,
+    refresh_promo_boundaries,
 )
 from shared.gateway_api import (
     API_PREFIX,
@@ -92,6 +93,7 @@ def get_label_pipeline() -> LabelPipeline:
 
 SessionDep = Annotated[Session, Depends(get_session)]
 NowDep = Annotated[datetime, Depends(get_now)]
+PipelineDep = Annotated[LabelPipeline, Depends(get_label_pipeline)]
 
 
 def require_gateway(
@@ -121,8 +123,15 @@ GatewayDep = Annotated[int, Depends(require_gateway)]
 
 @router.post("/jobs/claim", response_model=ClaimResponse)
 def claim(
-    body: ClaimRequest, gateway_id: GatewayDep, session: SessionDep, now: NowDep
+    body: ClaimRequest,
+    gateway_id: GatewayDep,
+    session: SessionDep,
+    now: NowDep,
+    pipeline: PipelineDep,
 ) -> ClaimResponse:
+    # Scheduled promo starts and ends first, so their new labels can be handed out in
+    # this same claim (decision 0014).
+    refresh_promo_boundaries(session, pipeline, now)
     jobs = claim_jobs(session, gateway_id, body.max_jobs, now)
     session.commit()
     return ClaimResponse(jobs=jobs)
@@ -179,7 +188,7 @@ def tags_seen(
     _: GatewayDep,
     session: SessionDep,
     now: NowDep,
-    pipeline: Annotated[LabelPipeline, Depends(get_label_pipeline)],
+    pipeline: PipelineDep,
 ) -> TagsSeenResponse:
     response = record_seen_tags(session, body.tags, pipeline, now)
     session.commit()

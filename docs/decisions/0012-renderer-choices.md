@@ -16,6 +16,9 @@ versions in `uv.lock`; after a Pillow upgrade they are regenerated deliberately
 not include the Pillow version, so an upgrade that changes any golden's pixels must also
 bump `TEMPLATE_VERSIONS` for the affected templates; otherwise stored renders, and the
 tags showing them, keep the old pixels (the information on them stays correct).
+This bump rule applies from M2's merge onwards. The two promo goldens changed during
+M2's review without a bump; nothing had been stored then, so no render or tag could
+keep the earlier pixels.
 
 **Unit price size.** The layout requires both `unit_size * 10 >= price_size * 7` on the
 font sizes and the same 70% on the ink height of the reference digits `0123456789`

@@ -8,6 +8,19 @@ public write function runs in one savepoint inside the caller's transaction, loc
 whole write uses one clock (docs/decisions/0007, 0008). The caller commits.
 
 Products are never deleted: products missing from an import are only listed.
+
+Every write that changes a price row or a product field then refreshes the labels of
+the product's bound tags (``core.services.tags.refresh_desired_hashes``) in the same
+savepoint and with the same ``now``, so a change and the update jobs it causes commit
+together (docs/decisions/0014). Lock order across catalogue and queue, the same in every
+transaction: ``store`` (imports only), then ``product``, then ``price`` rows, then
+``tag`` rows, then ``update_job`` rows. The queue and gateway code takes only the last
+two, in the same order, and never locks a store, product or price row (it reads them
+without locks; foreign-key checks take ``FOR KEY SHARE``, which the catalogue's ``FOR NO
+KEY UPDATE`` does not block). So there is no cycle between a catalogue writer and the
+queue. An import holds its tag locks while it renders every affected label (one render
+per bound tag, before commit); a gateway result for one of those tags waits for the
+import, and a claim skips them (``SKIP LOCKED``). That is accepted for v1.
 """
 
 from __future__ import annotations
@@ -56,6 +69,7 @@ from core.domain.types import (
     ProductFacts,
 )
 from core.importers.profile import ImportSettings, ParsedImport, parse_import
+from core.services.tags import LabelPipeline, real_label_pipeline, refresh_desired_hashes
 
 #: ``event_log.actor`` for writes no person made.
 SYSTEM_ACTOR = "system"
@@ -374,6 +388,21 @@ def _lock_prices(
     )
 
 
+def _refresh_labels(
+    session: Session,
+    pipeline: LabelPipeline | None,
+    now: datetime,
+    product_ids: Iterable[int | None],
+) -> None:
+    """Refresh the labels of the tags bound to ``product_ids`` and queue their updates.
+
+    Runs last in the writer's savepoint, after the product and price locks, so the tag
+    and job locks it takes come after them (see the module docstring)."""
+    ids = sorted({pid for pid in product_ids if pid is not None})
+    if ids:
+        refresh_desired_hashes(session, pipeline or real_label_pipeline, now, product_ids=ids)
+
+
 # --- Import ---------------------------------------------------------------------------
 
 
@@ -436,6 +465,7 @@ def apply_import(
     now: datetime | None = None,
     confirm_price_jumps: bool = False,
     thresholds: JumpThresholds | None = None,
+    pipeline: LabelPipeline | None = None,
 ) -> ImportResult:
     """Apply a file in one transaction (section 6, step 4).
 
@@ -449,7 +479,9 @@ def apply_import(
     ``apply_product_change`` and are logged per product as ``product.edited`` with the
     import run id. Unchanged rows write nothing, so re-importing a file
     adds no history. The manual-change flag is cleared on every product in the file.
-    Records an ``import_run`` with counts and an ``import.applied`` event.
+    Records an ``import_run`` with counts and an ``import.applied`` event. Then the
+    tags bound to every changed product get their labels refreshed with ``pipeline``
+    (``real_label_pipeline`` by default); new products have no tags yet.
     """
     _check_filename(filename)
     now = _check_now(now)
@@ -465,7 +497,8 @@ def apply_import(
         # can finish its inserts while this import waits for that product, instead of
         # deadlocking. Edits lock their product before its price, so a product without
         # a price row cannot get one behind the import's back (and vice versa): whoever
-        # comes second waits, then reads the committed row.
+        # comes second waits, then reads the committed row. The label refresh at the
+        # end takes tag rows, then update_job rows, after all of these (module docstring).
         session.execute(
             select(Store.id).where(Store.id == store_id).with_for_update(key_share=True)
         )
@@ -546,6 +579,7 @@ def apply_import(
             store_id,
         )
         session.flush()
+        _refresh_labels(session, pipeline, now, (e.product_id for e in diff.changed))
     return ImportResult(run, diff, price_events)
 
 
@@ -657,13 +691,15 @@ def edit_price(
     actor: str,
     now: datetime | None = None,
     store_id: int = DEFAULT_STORE_ID,
+    pipeline: LabelPipeline | None = None,
 ) -> PriceChange | None:
     """Change a product's regular price by hand (section 6, "Manual edit").
 
     Goes through ``apply_price_change`` with source ``manual``, keeping the stored promo
     unchanged, and marks the product as manually changed since the last import. Logs
-    ``price.manual`` with the old and new price. Returns ``None`` and writes nothing
-    when the price is already ``regular_cents``.
+    ``price.manual`` with the old and new price, then refreshes the labels of the
+    product's bound tags with ``pipeline``. Returns ``None`` and writes nothing when
+    the price is already ``regular_cents``.
     """
     if isinstance(regular_cents, bool) or not isinstance(regular_cents, int):
         raise TypeError("regular_cents must be an integer number of cents")
@@ -706,6 +742,7 @@ def edit_price(
             store_id,
         )
         session.flush()
+        _refresh_labels(session, pipeline, now, [product.id])
     return change
 
 
@@ -769,6 +806,7 @@ def edit_product(
     actor: str,
     now: datetime | None = None,
     store_id: int = DEFAULT_STORE_ID,
+    pipeline: LabelPipeline | None = None,
 ) -> PriceChange | None:
     """Edit a product's fields through the shared write path (Tasos, decision 4).
 
@@ -777,8 +815,10 @@ def edit_product(
     and writes a history row. Logs ``product.edited`` with each changed field's old and
     new value. Name and brand are normalised as in an import (``normalise_text``; an
     empty brand is stored as ``None``) before comparing, so an edit that changes
-    nothing, or only whitespace, writes nothing. Returns the price change, or ``None``
-    if the price is unaffected.
+    nothing, or only whitespace, writes nothing. Any other edit refreshes the labels of
+    the product's bound tags with ``pipeline`` (a field that no label shows simply
+    leaves their hashes unchanged). Returns the price change, or ``None`` if the price
+    is unaffected.
     """
     fields = fields.normalised()
     fields.check()
@@ -819,6 +859,7 @@ def edit_product(
             store_id,
         )
         session.flush()
+        _refresh_labels(session, pipeline, now, [product.id])
     return change
 
 
