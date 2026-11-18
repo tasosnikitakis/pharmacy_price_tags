@@ -92,6 +92,10 @@ class JobSnapshot:
     next_attempt_at: datetime | None
     claimed_at: datetime | None
     created_at: datetime
+    # Current values, so transitions that keep them can carry them through.
+    gateway_id: int | None = None
+    error_code: PushErrorCode | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

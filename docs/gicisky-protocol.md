@@ -408,7 +408,7 @@ target]
 1. Run a `BleakScanner` for `timeout_s` with a detection callback.
 2. For each advertisement with manufacturer data `0x5053` of exactly 5 bytes, decode section 1.2.
 3. Keep only device IDs in the driver's model table (section 2). Log unknown IDs at info level with the raw payload, so new variants show up in discovery reporting.
-4. Return one `SeenTag` per address (the latest advertisement): `vendor_id` = MAC, `model` = our tag type key from the driver's table (for example `gicisky-2.9-bwr`), `rssi`, `battery_mv = d[1] * 100`, `battery_pct = None` (section 7), `seen_at` = UTC now.
+4. Return one `SeenTag` per address (the latest advertisement): `vendor_id` = MAC, `model` = the `tag_type.model` value the driver's table gives for that device ID (the core matches `(vendor, model)` against the `tag_type` table; `SeenTagReport` docstring). It is not the tag type key, `rssi`, `battery_mv = d[1] * 100`, `battery_pct = None` (section 7), `seen_at` = UTC now.
 
 ### `push_image(vendor_id, tag_type, png)`
 
