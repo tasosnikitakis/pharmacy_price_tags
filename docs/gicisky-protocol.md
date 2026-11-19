@@ -32,7 +32,7 @@ independent description of a protocol that the vendor does not document.
 | Advertisement type | Connectable advertising; the tag must be connected to for an update. | [multi] |
 | Manufacturer company ID | `0x5053` (decimal 20563). On air the AD structure reads `FF 53 50 …`, because the ID is little-endian, so it shows as ASCII "SP". | [multi] |
 | Manufacturer payload length | Exactly **5 bytes** after the company ID (7 bytes if you count the company ID, which is how OpenEPaperLink counts). Anything else is not a stock Gicisky tag. | [multi] |
-| Local name | **Unknown.** No source filters by name, and the atc1441 uploader accepts any device. Do not rely on the name. | open question Q11 |
+| Local name | **Unknown.** No source filters by name, and the atc1441 uploader accepts any device. S8's README reports names of the form `NEMR` + 8 characters; see Q11. Do not rely on the name. | open question Q11 |
 | Advertised service UUIDs | hass-gicisky only parses the manufacturer data while iterating over the advertised service UUIDs, so tags seem to advertise at least one 16-bit service UUID. hass-ble-esl lists the GATT service as one of `0xFEF0`, `0xFDF0` or `0xFCF0`. | [inferred] / [single] |
 | Company ID shared with other products | hass-ble-esl fixed a discovery bug for "devices sharing manufacturer ID", and the hass-gicisky tracker has an ESL-29BWR sold under the Gicisky name that is not a Gicisky tag. Filter on company ID **and** a 5-byte payload **and** a known device ID. | [single] |
 
@@ -165,9 +165,9 @@ candidates to try on hardware.
 | Primary service | `0000fef0-0000-1000-8000-00805f9b34fb` (16-bit `0xFEF0`) | [multi] (atc1441, OEPL, hass-ble-esl) |
 | Alternative service UUIDs | `0xFDF0` and `0xFCF0` are also accepted by hass-ble-esl | [single] |
 | Command characteristic | `0xFEF1`: host writes commands, tag sends replies as **notifications** on the same characteristic | [multi] |
-| Image characteristic | `0xFEF2`: host writes image parts; no notifications | [multi] |
+| Image characteristic | `0xFEF2`: host writes image parts; no notifications | [multi]; S8's README lists `fef2` as "write + notify", but its code subscribes only on `FEF1`; Q5 checks the properties |
 | Discovery rule used by hass | Take all characteristics of services whose UUID starts with `0000f`, sort by the 16-bit short UUID, lowest is command, next is image; fewer than two is an error | [single]; consistent with fixed `FEF1`/`FEF2` |
-| Write type | **Write without response** for both characteristics (hass-gicisky, hass-ble-esl, OEPL). atc1441 uses Web Bluetooth's plain `writeValue`, which picks the mode from the characteristic's properties | [multi] for without-response; check properties on hardware, Q5 |
+| Write type | **Write without response** for both characteristics (hass-gicisky, hass-ble-esl, OEPL). atc1441 uses Web Bluetooth's plain `writeValue`, which picks the mode from the characteristic's properties | [multi] for without-response; S8 uses **write with response** on both and caps the part size at 512 bytes for that reason [single]; so both modes may work [inferred]; check properties on hardware, Q5 |
 | MTU | OEPL requests MTU 255. Each image part write is 244 bytes, so it needs an ATT MTU of at least **247** (244 + 3). No other source negotiates MTU explicitly | [single] for 255; the 247 minimum is [inferred] |
 
 Recommendation for the driver [inferred]: look characteristics up by UUID (`FEF1`/`FEF2`)
@@ -234,7 +234,7 @@ uses it for 2 bpp, so the driver should send **the 8-byte form with three zero b
 ### 4.3 Part size
 
 - Fixed at **240 data bytes + 4 index bytes = 244** in hass-gicisky, hass-ble-esl and OEPL. [multi]
-- atc1441 (latest commit "Allow display to set image data message size") takes the size from the START reply: part data = reply value − 4. [single] The observed reply value is 244, so both readings give 240.
+- atc1441 (latest commit "Allow display to set image data message size") and S8 both take the size from the START reply: part data = reply value − 4. S8 accepts reply values from 8 to 512. [multi] The observed reply value is 244, so both readings give 240.
 - Driver recommendation [inferred]: parse the uint16 from the START reply and use `value − 4` as the part size. Refuse (`protocol`) if it is 0, larger than `mtu − 3 − 4`, or the reply is malformed. Log it if it is not 244.
 - Number of parts = `ceil(total_bytes / part_size)`; the last part is shorter, with no padding. [multi]
 
@@ -244,7 +244,7 @@ uses it for 2 bpp, so the driver should send **the 8-byte form with three zero b
 | --- | --- | --- |
 | Tag requests part `N` | Send exactly part `N`, whatever was sent before. atc1441 and hass follow the tag's request; OEPL aborts if `N` is not the next sequential part | [multi] for "tag picks the part"; OEPL is stricter |
 | Tag requests the same part again | The tag could not accept it. hass-ble-esl resends with a linear back-off of 0.05 s × (repeat − 1) and gives up after 6 consecutive requests for the same part; hass-gicisky gives up after 3 | [single] |
-| Tag requests a part past the end | hass treats it as complete. hass-ble-esl also returns success | [single]; risky, see Q7 |
+| Tag requests a part past the end | hass treats it as complete. hass-ble-esl also returns success. S8 treats a request for the first index past the end as complete if every part was sent, and raises an error for any higher index | [single] (S8 counted separately: its check is its own code); risky, see Q7 |
 | `05 08` before the last part was sent | hass-ble-esl treats it as an error ("completion after part …") | [single] |
 | `05 xx`, with `xx` neither `00` nor `08` | atc1441 logs an error and aborts. No source documents what the values mean | [single] |
 | START not answered | hass-ble-esl: the tag may drop the first START right after subscribing; it waits 0.2 s after subscribing and resends START up to 3 times, with 0.4 s timeouts. Observed answer times were 0.05–0.19 s | [single] |
@@ -383,13 +383,13 @@ source tags with **[hardware]**.
 | Q2 | Rotation and mirroring. | Push a test PNG with an asymmetric marker: a black "F" in the top-left corner, a red bar along the top edge, a small square at the bottom-right. Try the hass mapping (section 2) first; if it is wrong, try the other three flip combinations. Record which combination is upright for each device ID. |
 | Q3 | Real timings: connect, handshake, transfer, refresh, and how soon the tag accepts the next connection. | Time each phase with `time.monotonic()` in `push_png.py`; repeat 50 pushes at 3 m (the M4 criterion) and note failures by phase. Also try 10 m. |
 | Q4 | Is battery in the advertisement correct, and how does it fall? | Compare `d[1]` with a multimeter on the cell; log it daily during the pilot. |
-| Q5 | Characteristic properties: write-without-response support, notify vs indicate. | Print `char.properties` for `FEF1`/`FEF2` after connecting. |
+| Q5 | Characteristic properties: write-without-response support, notify vs indicate. S8 writes with response; if both modes are offered, time a push in each. Also check whether `FEF2` offers notify (S8's README says so). | Print `char.properties` for `FEF1`/`FEF2` after connecting. |
 | Q6 | Does the tag accept the 8-byte SIZE command, the 6-byte one, or both? | Send the 8-byte form (default). If the reply is not `02`, try the 6-byte form `02 SS SS SS SS 00`. |
 | Q7 | Is `05 08` always sent after the last part? Does the tag ever request a part past the end? | Log every notification during the 50-push run. |
-| Q8 | Is BWRY really 2 bpp (if we have a BWRY tag)? | Push a 4-colour stripe pattern as 2 bpp; if it shows noise, try BW plus red planes. |
+| Q8 | Is BWRY really 2 bpp (if we have a BWRY tag)? S8, a driver written only for `0x002E`, sends 2 bpp with the codes of section 5.2 (first pixel in the top two bits; the codes come from hass, S1) and shows a photo of a tag displaying it, which is hardware evidence for 2 bpp. Our pilot tags are BWR, so this may stay untested. | Push a 4-colour stripe pattern as 2 bpp; if it shows noise, try BW plus red planes. |
 | Q9 | Does the BW bit under a red pixel matter? | Push red areas with BW bit 0, then with BW bit 1, and compare the colour. |
 | Q10 | MTU on the shop box (BlueZ) and on a Windows dev laptop. | Log `client.mtu_size`; confirm that 244-byte writes without response arrive intact (tag requests the next part rather than repeating). |
-| Q11 | Local name and advertised service UUIDs. | Log `AdvertisementData.local_name` and `service_uuids`. Decide whether the scan filter can use them. |
+| Q11 | Local name and advertised service UUIDs. S8 reports a local name of the form `NEMR` + 8 characters (example `NEMR92833721`) and that the last four octets of the address are printed on the tag's label. If those 8 characters are the same four octets, they are hex digits and can include A–F [inferred]. One source only; the name may differ by model. | Log `AdvertisementData.local_name` and `service_uuids`. Decide whether the scan filter can use them. |
 | Q12 | What do `05 xx` error codes mean? | Provoke errors: a wrong SIZE (one byte too few), an out-of-order part, a short part. Log the replies. |
 | Q13 | Is START sometimes dropped right after subscribing? | Count START retries over the 50-push run. |
 | Q14 | Does disconnecting immediately after `05 08` ever abort the refresh? | During the 50-push run, check that each pushed image is the one shown. |
@@ -443,7 +443,7 @@ contacting the tag. This is part of the `TagDriver.push_image` contract in
 
 ## Sources
 
-All sources were read on 2026-11-18. "Commit" is the latest commit touching the files that
+All sources were read on 2026-11-18, except S8 (2026-11-19). "Commit" is the latest commit touching the files that
 were read, as shown by the repository's history page at that time.
 
 | # | Name | URL | Commit / version read | Licence (SPDX) | What we took from it |
@@ -455,6 +455,7 @@ were read, as shown by the repository's history page at that time.
 | S5 | OpenEPaperLink, ESP32 access point firmware, BLE support | https://github.com/OpenEPaperLink/OpenEPaperLink (`ESP32_AP-Flasher/src/ble_filter.cpp`, `ble_writer.cpp`) | `ble_writer.cpp` at `a2a2f22005d5aa5aaff09cf729ef1f6f1a7777c1` (2026-10-21); `ble_filter.cpp` at `df2031b401e05f29bb2c9adbd29982f65daa58c3` (2026-11-02) | **CC-BY-NC-SA-4.0 (non-commercial).** Used only to understand the protocol. No code, no snippets, and no tables copied; everything here is our own wording. | Independent confirmation of the advertisement layout, UUIDs, write without response, 240-byte parts, the `05 08` completion, and bit 14 = no compression. Its readings that differ: 6-byte SIZE form, bit-8 mirroring, strict sequential parts, MTU 255, 30 s silence timeout, 5 s post-connect wait. |
 | S6 | ha-bleep (magicus), Home Assistant integration for PickSmart/Gicisky | https://github.com/magicus/ha-bleep | `main` as of 2026-11-18 (hash not shown on the page) | **None stated** | Nothing usable: the integration code is a stub. README only (296 × 128 the one model marked verified; BW and BWR only). |
 | S7 | hass-gicisky issue tracker, issues #20 and #21 | https://github.com/eigger/hass-gicisky/issues/20, https://github.com/eigger/hass-gicisky/issues/21 | read 2026-11-18 | Discussion, no licence | Look-alike tags under the Gicisky name that use another protocol; field reliability notes (proxies, retries, handshakes of up to about 20 s). |
+| S8 | gicisky-296-bwry (RealPotatoe), Python BLE driver for the 2.9" BWRY tag, also on PyPI | https://github.com/RealPotatoe/gicisky-296-bwry | `6abc1f2fc390892faa83ecd4f2e1e2aef5f65769` (read 2026-11-19); `README.md`, `src/gicisky_296_bwry/{device,encoder}.py` | MIT | **Derived from S1:** its README says its protocol and colour/rotation profile were worked out with reference to hass-gicisky, and its code credits hass for the SIZE trailer and the colour classification. So for the command sequence, the 8-byte SIZE form and the 2 bpp codes it restates S1 and does not count as a second source. Its own behaviour, counted separately: part size read from the START reply (8–512 accepted; hass checks for exactly `01 F4 00`); write with response, with parts capped at 512 bytes; completion accepted only after every part was sent, with the first index past the end also taken as completion (section 4.4); no MTU handling; no service UUID lookup. Defaults: connect 30 s, 10 s per reply, 300 s per upload, 3 retries per part, 0.5 s after subscribing. No advertisement parsing; README reports the `NEMR` local name (Q11). A README photo shows a tag displaying an image (Q8). Facts only; no code copied. |
 
 Sources that could not be read, because the session network blocked the host:
 
